@@ -1,7 +1,7 @@
 From 435143c5be131a25b784f5d8dcf80eb027d6327a Mon Sep 17 00:00:00 2001
 From: Marc Aldrich <7917445+MarcAldrich@users.noreply.github.com>
 Date: Sat, 21 Nov 2026 23:03:13 -0600
-Subject: [PATCH 3/5] inkling2_serve: OpenAI tool_calls, reasoning_effort, and
+Subject: [PATCH 3/6] inkling2_serve: OpenAI tool_calls, reasoning_effort, and
  --host support
 
 Pass tools and reasoning_effort into Inkling-2-Mini chat_template.jinja, canonicalize JSON-string

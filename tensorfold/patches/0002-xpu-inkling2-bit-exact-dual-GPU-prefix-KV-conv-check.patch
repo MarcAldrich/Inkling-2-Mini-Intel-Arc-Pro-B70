@@ -1,7 +1,7 @@
 From f1e74aa901f4f7d52adf4904d2f13ffa06a2226a Mon Sep 17 00:00:00 2001
 From: Marc Aldrich <7917445+MarcAldrich@users.noreply.github.com>
 Date: Sat, 21 Nov 2026 23:03:13 -0600
-Subject: [PATCH 2/5] xpu-inkling2: bit-exact dual GPU prefix KV/conv
+Subject: [PATCH 2/6] xpu-inkling2: bit-exact dual GPU prefix KV/conv
  checkpoint cache in --serve
 
 Add ckpt_sys (system/tools prefix before first <|message_user|>) and ckpt_last (prior prompt

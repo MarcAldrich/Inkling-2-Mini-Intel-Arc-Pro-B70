@@ -21,7 +21,9 @@ import tempfile
 import time
 import unicodedata
 import urllib.error
+import urllib.parse
 import urllib.request
+import http.client
 
 import numpy as np
 
@@ -465,6 +467,49 @@ def run_http_gates(args):
     if jv2["timings"].get("vision_ms", 1.0) != 0.0:
         fail(f"vision image cache did not hit on Turn 2: {jv2['timings']}")
     ok(f"vision gate PASSED: answer={ans_v1.strip()!r}, T1 vision_ms={jv1['timings']['vision_ms']:.1f}, T2 cached vision_ms=0.0")
+
+    # 3e. Streaming client-disconnect abort recovery (regression for BrokenPipeError pipe-desync bug)
+    parsed = urllib.parse.urlparse(base)
+    conn = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=60)
+    abort_payload = json.dumps({
+        "model": model_id,
+        "messages": [{"role": "user", "content": "Count slowly from 1 to 80 separated by commas."}],
+        "reasoning_effort": "low",
+        "temperature": 0.7,
+        "max_tokens": 128,
+        "stream": True,
+    }).encode()
+    conn.request("POST", "/v1/chat/completions", body=abort_payload, headers={"Content-Type": "application/json"})
+    resp = conn.getresponse()
+    if resp.status != 200:
+        fail(f"disconnect test expected HTTP 200, got {resp.status}")
+    seen_chunks = 0
+    while seen_chunks < 2:
+        line = resp.readline()
+        if not line:
+            break
+        if line.startswith(b"data: "):
+            seen_chunks += 1
+    # Abruptly drop socket mid-stream before server finishes generating!
+    conn.close()
+
+    # Follow-up request MUST succeed cleanly with zero pipe desync (also verifies reasoning_effort="off" -> "none")
+    _, post_raw = http_post(
+        f"{base}/v1/chat/completions",
+        {
+            "model": model_id,
+            "messages": [{"role": "user", "content": "What is 17*23? Reply with only the number."}],
+            "reasoning_effort": "off",
+            "temperature": 0.0,
+            "max_tokens": 64,
+        },
+        timeout=60,
+    )
+    post_j = json.loads(post_raw)
+    post_ans = (post_j["choices"][0]["message"].get("content") or "").strip()
+    if "391" not in post_ans:
+        fail(f"post-disconnect follow-up failed or desynced: got {post_ans!r}")
+    ok(f"streaming disconnect recovery + reasoning_effort='off' PASSED: follow-up answer={post_ans!r}")
 
 
 def main():

@@ -1,7 +1,7 @@
 From f1b1eac47b3166c263c801614e326e17660eab39 Mon Sep 17 00:00:00 2001
 From: Marc Aldrich <7917445+MarcAldrich@users.noreply.github.com>
 Date: Sun, 22 Nov 2026 00:03:41 -0600
-Subject: [PATCH 4/5] xpu-inkling2: native Xe2 XMX vision tower (mmproj-F16
+Subject: [PATCH 4/6] xpu-inkling2: native Xe2 XMX vision tower (mmproj-F16
  inkling2v)
 
 Add end-to-end multimodal image support for Inkling-2-Mini (mmproj-F16.gguf / inkling2v):

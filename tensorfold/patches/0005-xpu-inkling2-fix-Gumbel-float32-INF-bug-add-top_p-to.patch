@@ -1,7 +1,7 @@
 From 1ff691913bc889d0bcd0e019e8f4072b6227f116 Mon Sep 17 00:00:00 2001
 From: Marc Aldrich <7917445+MarcAldrich@users.noreply.github.com>
 Date: Sun, 22 Nov 2026 08:15:06 -0600
-Subject: [PATCH 5/5] xpu-inkling2: fix Gumbel float32 +INF bug, add
+Subject: [PATCH 5/6] xpu-inkling2: fix Gumbel float32 +INF bug, add
  top_p/top_k/min_p, zero XMX KV tail
 
 ---

@@ -1,0 +1,149 @@
+From b343e77e41761a2b72a47e614d055ffb37455cf8 Mon Sep 17 00:00:00 2001
+From: Marc Aldrich <7917445+MarcAldrich@users.noreply.github.com>
+Date: Sun, 22 Nov 2026 09:44:40 -0600
+Subject: [PATCH 6/6] inkling2_serve: drain runner on mid-stream client
+ disconnect, bump default max_tokens to 16384
+
+---
+ tools/xpu/inkling2_serve.py | 94 ++++++++++++++++++++++++-------------
+ 1 file changed, 62 insertions(+), 32 deletions(-)
+
+diff --git a/tools/xpu/inkling2_serve.py b/tools/xpu/inkling2_serve.py
+index cf0a7b7b..bafc5924 100644
+--- a/tools/xpu/inkling2_serve.py
++++ b/tools/xpu/inkling2_serve.py
+@@ -263,11 +263,14 @@ def make_handler(args, runner, tok, template):
+ 
+         def reply(self, code, obj):
+             b = json.dumps(obj).encode()
+-            self.send_response(code)
+-            self.send_header("Content-Type", "application/json")
+-            self.send_header("Content-Length", str(len(b)))
+-            self.end_headers()
+-            self.wfile.write(b)
++            try:
++                self.send_response(code)
++                self.send_header("Content-Type", "application/json")
++                self.send_header("Content-Length", str(len(b)))
++                self.end_headers()
++                self.wfile.write(b)
++            except (BrokenPipeError, ConnectionResetError, OSError):
++                self.close_connection = True
+ 
+         def do_GET(self):
+             if self.path.startswith("/v1/models"):
+@@ -294,6 +297,8 @@ def make_handler(args, runner, tok, template):
+             kw.pop("enable_thinking", None)  # the release's template takes reasoning_effort; thinking cannot be off
+             if body.get("reasoning_effort") is not None and "reasoning_effort" not in kw:
+                 kw["reasoning_effort"] = body["reasoning_effort"]
++            if isinstance(kw.get("reasoning_effort"), str) and kw["reasoning_effort"].strip().lower() == "off":
++                kw["reasoning_effort"] = "none"
+             if body.get("tools"):
+                 kw["tools"] = body["tools"]
+             msgs = normalize_messages(body["messages"])
+@@ -312,7 +317,7 @@ def make_handler(args, runner, tok, template):
+             raw_temp = float(body.get("temperature", 1.0))
+             temp = 0.0 if (top_k == 1 or raw_temp <= 0.0) else raw_temp
+             seed = int(body.get("seed", random.getrandbits(63))) & ((1 << 64) - 1)
+-            max_new = int(body.get("max_tokens") or body.get("max_completion_tokens") or 4096)
++            max_new = int(body.get("max_tokens") or body.get("max_completion_tokens") or 16384)
+             stream = bool(body.get("stream"))
+             rid = "chatcmpl-%x" % random.getrandbits(48)
+             split = Splitter(tok)
+@@ -337,30 +342,52 @@ def make_handler(args, runner, tok, template):
+                         else:
+                             expanded.append(tid)
+                     ids = expanded
++                client_gone = False
+                 if stream:
+-                    self.send_response(200)
+-                    self.send_header("Content-Type", "text/event-stream")
+-                    self.send_header("Cache-Control", "no-cache")
+-                    self.send_header("Connection", "close")
+-                    self.end_headers()
++                    try:
++                        self.send_response(200)
++                        self.send_header("Content-Type", "text/event-stream")
++                        self.send_header("Cache-Control", "no-cache")
++                        self.send_header("Connection", "close")
++                        self.end_headers()
++                    except (BrokenPipeError, ConnectionResetError, OSError):
++                        self.close_connection = True
++                        return
+                 last, end = None, None
+-                for ev in runner.generate(ids, max_new, temp, seed, top_p=top_p, top_k=top_k, min_p=min_p):
+-                    if ev[0] == "e":
+-                        end = ev
+-                        break
+-                    last = ev[1]
+-                    d = split.push(ev[1])
+-                    if d and stream:
+-                        if d[0] == "tool_call":
+-                            tc_delta = {"index": d[1], "id": d[2]["id"], "type": "function",
+-                                        "function": d[2]["function"]}
+-                            self.sse({"id": rid, "object": "chat.completion.chunk", "model": args.name,
+-                                      "choices": [{"index": 0, "delta": {"tool_calls": [tc_delta]}, "finish_reason": None}]})
+-                        else:
+-                            key = "content" if d[0] == "content" else "reasoning_content"
+-                            self.sse({"id": rid, "object": "chat.completion.chunk", "model": args.name,
+-                                      "choices": [{"index": 0, "delta": {key: d[1]}, "finish_reason": None}]})
++                gen = runner.generate(ids, max_new, temp, seed, top_p=top_p, top_k=top_k, min_p=min_p)
++                try:
++                    for ev in gen:
++                        if ev[0] == "e":
++                            end = ev
++                            break
++                        last = ev[1]
++                        if client_gone:
++                            continue
++                        d = split.push(ev[1])
++                        if d and stream:
++                            try:
++                                if d[0] == "tool_call":
++                                    tc_delta = {"index": d[1], "id": d[2]["id"], "type": "function",
++                                                "function": d[2]["function"]}
++                                    self.sse({"id": rid, "object": "chat.completion.chunk", "model": args.name,
++                                              "choices": [{"index": 0, "delta": {"tool_calls": [tc_delta]}, "finish_reason": None}]})
++                                else:
++                                    key = "content" if d[0] == "content" else "reasoning_content"
++                                    self.sse({"id": rid, "object": "chat.completion.chunk", "model": args.name,
++                                              "choices": [{"index": 0, "delta": {key: d[1]}, "finish_reason": None}]})
++                            except (BrokenPipeError, ConnectionResetError, OSError):
++                                client_gone = True
++                finally:
++                    if end is None:
++                        for ev in gen:
++                            if ev[0] == "e":
++                                end = ev
++                                break
+                 _, pn, gn, ps, ds = end
++                if client_gone:
++                    print(f"[serve] client disconnected mid-stream ({rid}); drained runner cleanly (gen={gn})", flush=True)
++                    self.close_connection = True
++                    return
+                 usage = {"prompt_tokens": pn, "completion_tokens": gn, "total_tokens": pn + gn,
+                          "completion_tokens_details": {"reasoning_tokens": split.count["reasoning"],
+                                                        "answer_tokens": split.count["content"]}}
+@@ -375,11 +402,14 @@ def make_handler(args, runner, tok, template):
+                 else:
+                     finish = "length"
+                 if stream:
+-                    self.sse({"id": rid, "object": "chat.completion.chunk", "model": args.name,
+-                              "choices": [{"index": 0, "delta": {}, "finish_reason": finish}], "usage": usage,
+-                              "timings": timings})
+-                    self.wfile.write(b"data: [DONE]\n\n")
+-                    self.wfile.flush()
++                    try:
++                        self.sse({"id": rid, "object": "chat.completion.chunk", "model": args.name,
++                                  "choices": [{"index": 0, "delta": {}, "finish_reason": finish}], "usage": usage,
++                                  "timings": timings})
++                        self.wfile.write(b"data: [DONE]\n\n")
++                        self.wfile.flush()
++                    except (BrokenPipeError, ConnectionResetError, OSError):
++                        pass
+                     self.close_connection = True
+                     return
+                 msg = {"role": "assistant", "content": split.text["content"] or None,
+-- 
+2.53.0
+
