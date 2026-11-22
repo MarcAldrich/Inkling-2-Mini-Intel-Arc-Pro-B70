@@ -1,0 +1,215 @@
+From 435143c5be131a25b784f5d8dcf80eb027d6327a Mon Sep 17 00:00:00 2001
+From: Marc Aldrich <7917445+MarcAldrich@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 23:03:13 -0600
+Subject: [PATCH 3/4] inkling2_serve: OpenAI tool_calls, reasoning_effort, and
+ --host support
+
+Pass tools and reasoning_effort into Inkling-2-Mini chat_template.jinja, canonicalize JSON-string
+assistant tool_call arguments, parse <|content_invoke_tool_json|> into OpenAI tool_calls (streaming
+and non-streaming), add --host flag (default 127.0.0.1), and accept standard OpenAI top_p fields.
+---
+ tools/xpu/inkling2_serve.py | 121 ++++++++++++++++++++++++++++++------
+ 1 file changed, 103 insertions(+), 18 deletions(-)
+
+diff --git a/tools/xpu/inkling2_serve.py b/tools/xpu/inkling2_serve.py
+index a3dddc38..49f02079 100644
+--- a/tools/xpu/inkling2_serve.py
++++ b/tools/xpu/inkling2_serve.py
+@@ -19,6 +19,30 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+ from transformers import PreTrainedTokenizerFast
+ 
+ MESSAGE_MODEL, CONTENT_TEXT, EOS, CONTENT_THINKING, END_MESSAGE = 200001, 200004, 200006, 200008, 200010
++CONTENT_TOOL_JSON, CONTENT_TOOL_TEXT = 200049, 200057
++
++
++def normalize_messages(messages):
++    """Canonicalize OpenAI messages for Inkling-2-Mini's chat_template.jinja (parse JSON string tool_call arguments)."""
++    out = []
++    for m in messages:
++        if m.get("role") == "assistant" and m.get("tool_calls"):
++            m = dict(m)
++            tcs = []
++            for tc in m["tool_calls"]:
++                tc = dict(tc)
++                fn = dict(tc.get("function") or {})
++                args = fn.get("arguments")
++                if isinstance(args, str):
++                    try:
++                        fn["arguments"] = json.loads(args) if args.strip() else {}
++                    except json.JSONDecodeError:
++                        fn["arguments"] = {"_raw": args}
++                tc["function"] = fn
++                tcs.append(tc)
++            m["tool_calls"] = tcs
++        out.append(m)
++    return out
+ 
+ 
+ class Runner:
+@@ -49,24 +73,73 @@ class Runner:
+ 
+ 
+ class Splitter:
+-    """Token ids to reasoning / content text deltas."""
++    """Token ids to reasoning / content text deltas and OpenAI tool_calls."""
+ 
+     def __init__(self, tok):
+         self.tok = tok
+-        self.mode = "content"
+-        self.count = {"content": 0, "reasoning": 0}
++        self.mode = "header"
++        self.count = {"content": 0, "reasoning": 0, "tool": 0}
+         self.ids = {"content": [], "reasoning": []}
+         self.text = {"content": "", "reasoning": ""}
++        self.tool_ids = []
++        self.header_ids = []
++        self.tool_calls = []
++
++    def _flush_tool(self):
++        if not self.tool_ids:
++            return None
++        raw = self.tok.decode(self.tool_ids, skip_special_tokens=True).strip()
++        hdr_name = self.tok.decode(self.header_ids, skip_special_tokens=True).strip()
++        self.tool_ids = []
++        self.header_ids = []
++        name, args = hdr_name, {}
++        try:
++            obj = json.loads(raw)
++            if isinstance(obj, dict):
++                name = obj.get("name") or hdr_name
++                args = obj.get("args") if "args" in obj else obj.get("arguments", {})
++        except json.JSONDecodeError:
++            args = {"_raw": raw}
++        idx = len(self.tool_calls)
++        tc = {
++            "id": "call_%012x" % random.getrandbits(48),
++            "type": "function",
++            "function": {
++                "name": name,
++                "arguments": json.dumps(args, separators=(",", ":")) if not isinstance(args, str) else args,
++            },
++        }
++        self.tool_calls.append(tc)
++        return ("tool_call", idx, tc)
+ 
+     def push(self, t):
++        if t == MESSAGE_MODEL:
++            self.mode = "header"
++            self.header_ids = []
++            return None
+         if t == CONTENT_THINKING:
+             self.mode = "reasoning"
+             return None
+         if t == CONTENT_TEXT:
+             self.mode = "content"
+             return None
++        if t in (CONTENT_TOOL_JSON, CONTENT_TOOL_TEXT):
++            self.mode = "tool_json"
++            self.tool_ids = []
++            return None
++        if t in (END_MESSAGE, EOS):
++            ev = self._flush_tool() if self.mode == "tool_json" else None
++            self.mode = "header"
++            return ev
+         if t >= 199998:  # other control tokens carry no text
+             return None
++        if self.mode == "header":
++            self.header_ids.append(t)
++            return None
++        if self.mode == "tool_json":
++            self.count["tool"] += 1
++            self.tool_ids.append(t)
++            return None
+         m = self.mode
+         self.count[m] += 1
+         self.ids[m].append(t)
+@@ -104,16 +177,14 @@ def make_handler(args, runner, tok, template):
+                 return self.reply(404, {"error": "not found"})
+             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+             top_k = body.get("top_k")
+-            if float(body.get("top_p", 1.0)) != 1.0 or top_k not in (None, 0, -1, 1):
+-                return self.reply(400, {"error": "only top_p 1, and top_k 1 (greedy) or none, are supported"})
+-            for k in ("presence_penalty", "frequency_penalty"):
+-                if float(body.get(k, 0) or 0) != 0:
+-                    return self.reply(400, {"error": k + " must be 0"})
+-            if float(body.get("repetition_penalty", 1.0) or 1.0) != 1.0:
+-                return self.reply(400, {"error": "repetition_penalty must be 1"})
+             kw = dict(body.get("chat_template_kwargs") or {})
+             kw.pop("enable_thinking", None)  # the release's template takes reasoning_effort; thinking cannot be off
+-            text = tok.apply_chat_template(body["messages"], chat_template=template, add_generation_prompt=True,
++            if body.get("reasoning_effort") is not None and "reasoning_effort" not in kw:
++                kw["reasoning_effort"] = body["reasoning_effort"]
++            if body.get("tools"):
++                kw["tools"] = body["tools"]
++            msgs = normalize_messages(body["messages"])
++            text = tok.apply_chat_template(msgs, chat_template=template, add_generation_prompt=True,
+                                            tokenize=False, **kw)
+             ids = tok.encode(text, add_special_tokens=False)
+             temp = 0.0 if top_k == 1 else float(body.get("temperature", 1.0))
+@@ -138,9 +209,15 @@ def make_handler(args, runner, tok, template):
+                     last = ev[1]
+                     d = split.push(ev[1])
+                     if d and stream:
+-                        key = "content" if d[0] == "content" else "reasoning_content"
+-                        self.sse({"id": rid, "object": "chat.completion.chunk", "model": args.name,
+-                                  "choices": [{"index": 0, "delta": {key: d[1]}, "finish_reason": None}]})
++                        if d[0] == "tool_call":
++                            tc_delta = {"index": d[1], "id": d[2]["id"], "type": "function",
++                                        "function": d[2]["function"]}
++                            self.sse({"id": rid, "object": "chat.completion.chunk", "model": args.name,
++                                      "choices": [{"index": 0, "delta": {"tool_calls": [tc_delta]}, "finish_reason": None}]})
++                        else:
++                            key = "content" if d[0] == "content" else "reasoning_content"
++                            self.sse({"id": rid, "object": "chat.completion.chunk", "model": args.name,
++                                      "choices": [{"index": 0, "delta": {key: d[1]}, "finish_reason": None}]})
+                 _, pn, gn, ps, ds = end
+                 usage = {"prompt_tokens": pn, "completion_tokens": gn, "total_tokens": pn + gn,
+                          "completion_tokens_details": {"reasoning_tokens": split.count["reasoning"],
+@@ -148,7 +225,10 @@ def make_handler(args, runner, tok, template):
+                 timings = {"prompt_n": pn, "prompt_ms": ps * 1e3, "predicted_n": gn, "predicted_ms": ds * 1e3,
+                            "predicted_per_second": (gn - 1) / ds if ds > 0 and gn > 1 else None,
+                            "wall_ms": (time.monotonic() - t0) * 1e3}
+-                finish = "stop" if last == EOS else "length"
++                if last == EOS:
++                    finish = "tool_calls" if split.tool_calls else "stop"
++                else:
++                    finish = "length"
+                 if stream:
+                     self.sse({"id": rid, "object": "chat.completion.chunk", "model": args.name,
+                               "choices": [{"index": 0, "delta": {}, "finish_reason": finish}], "usage": usage,
+@@ -157,8 +237,12 @@ def make_handler(args, runner, tok, template):
+                     self.wfile.flush()
+                     self.close_connection = True
+                     return
+-                msg = {"role": "assistant", "content": split.text["content"],
++                msg = {"role": "assistant", "content": split.text["content"] or None,
+                        "reasoning_content": split.text["reasoning"]}
++                if split.tool_calls:
++                    msg["tool_calls"] = split.tool_calls
++                elif msg["content"] is None:
++                    msg["content"] = ""
+                 self.reply(200, {"id": rid, "object": "chat.completion", "model": args.name,
+                                  "choices": [{"index": 0, "message": msg, "finish_reason": finish}],
+                                  "usage": usage, "timings": timings})
+@@ -175,6 +259,7 @@ def main():
+     ap.add_argument("--runner", required=True)
+     ap.add_argument("--model", required=True)
+     ap.add_argument("--meta", required=True)
++    ap.add_argument("--host", default="127.0.0.1")
+     ap.add_argument("--port", type=int, required=True)
+     ap.add_argument("--ctx", type=int, default=49152)
+     ap.add_argument("--name", default="inkling")
+@@ -182,8 +267,8 @@ def main():
+     tok = PreTrainedTokenizerFast(tokenizer_file=os.path.join(args.meta, "tokenizer.json"))
+     template = open(os.path.join(args.meta, "chat_template.jinja")).read()
+     runner = Runner(args.runner, args.model, args.ctx)
+-    srv = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(args, runner, tok, template))
+-    print(f"listening on 127.0.0.1:{args.port}", flush=True)
++    srv = ThreadingHTTPServer((args.host, args.port), make_handler(args, runner, tok, template))
++    print(f"listening on {args.host}:{args.port}", flush=True)
+     srv.serve_forever()
+ 
+ 
+-- 
+2.53.0
+

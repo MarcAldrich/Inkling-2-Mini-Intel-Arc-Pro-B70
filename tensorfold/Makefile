@@ -8,7 +8,8 @@ ALIAS          ?= inkling
 IMAGE          ?= llama-b70-inkling:tf-xpu
 MODEL_DIR      ?= $(abspath ..)
 MODEL_FILE     ?= Inkling-2-Mini-UD-Q4_K_XL.gguf
-CTX            ?= 16384
+MMPROJ_FILE    ?= mmproj-F16.gguf
+CTX            ?= 262144
 HEALTH_TIMEOUT ?= 300
 
 .PHONY: build rebuild run stop logs status health smoke bench profile
@@ -32,6 +33,8 @@ run:
 	RENDER_NODE=$$(readlink -f /dev/dri/by-path/pci-$$PCI_ADDR-render); \
 	CARD_NODE=$$(readlink -f /dev/dri/by-path/pci-$$PCI_ADDR-card); \
 	echo "GPU: $$PCI_ADDR -> $$RENDER_NODE"; \
+	MMPROJ_ARG=""; \
+	if [ -f "$(MODEL_DIR)/$(MMPROJ_FILE)" ]; then MMPROJ_ARG="--mmproj /models/$(MMPROJ_FILE)"; fi; \
 	podman rm -f $(NAME) >/dev/null 2>&1 || true; \
 	podman run -d --name $(NAME) \
 		-p $(PORT):8080 \
@@ -44,6 +47,7 @@ run:
 		-e ZE_AFFINITY_MASK=0 \
 		$(IMAGE) \
 		--model /models/$(MODEL_FILE) \
+		$$MMPROJ_ARG \
 		--host 0.0.0.0 --port 8080 \
 		--ctx $(CTX) \
 		--name $(ALIAS)

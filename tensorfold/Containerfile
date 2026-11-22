@@ -1,17 +1,17 @@
 # syntax=docker/dockerfile:1
 #
-# Inkling-2-Mini — TensorFold XPU Research Build (SergiioB/TensorFold @ b70-inkling2-mini-20261121)
+# Inkling-2-Mini — TensorFold XPU (SergiioB/TensorFold @ b70-inkling2-mini-20261121 + Xe2 XMX/DP4A/Vision patches)
 # Target: Intel Arc Pro B70 (BMG-G31 / Xe2) via Intel Level Zero
-# Serves OpenAI-compatible API on port 8080.
+# Serves OpenAI-compatible API (text, reasoning, tools, vision) on port 8080.
 #
 
-FROM ubuntu:26.04 AS builder
+FROM ubuntu:26.04 AS deps
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl git xz-utils binutils \
-    intel-ocloc \
+    intel-ocloc libigc2 libigdfcl2 libigdgmm12 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Zig 0.17.0 (verified sha256)
@@ -23,25 +23,6 @@ RUN curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${Z
     tar -xf /tmp/zig.tar.xz -C /opt/zig --strip-components=1 && \
     rm /tmp/zig.tar.xz
 
-WORKDIR /app
-
-# Clone exact tagged research build and verify commit
-ARG TF_TAG=b70-inkling2-mini-20261121
-ARG TF_COMMIT=e47dc7ae8e06c9cdefb846e01cf4671bad6cb3db
-RUN git clone --depth 1 --branch "${TF_TAG}" https://github.com/SergiioB/TensorFold.git /app/tf && \
-    [ "$(git -C /app/tf rev-parse HEAD)" = "${TF_COMMIT}" ]
-
-# Build xpu-inkling2 (compiles ink2.cl with ocloc for bmg at 128 & 256 GRF and embeds both)
-RUN cd /app/tf && \
-    /opt/zig/zig build xpu-inkling2 -Doptimize=ReleaseFast --prefix /app/out
-
-# Verify binary reproducibility against cookbook measured hashes (.text, .rodata, .data)
-RUN BIN=/app/out/bin/xpu-inkling2 && \
-    test "$(objcopy -O binary --only-section=.text   "$BIN" /dev/stdout | sha256sum | cut -c1-64)" = "f766626a2b07e6acdd08ce2f866796c8601627957f48098ea35dd019f2a250dd" && \
-    test "$(objcopy -O binary --only-section=.rodata "$BIN" /dev/stdout | sha256sum | cut -c1-64)" = "fef235af923140e8c303b7ad1086abfa1c93f8af9b91f88341ada4cadba00348" && \
-    test "$(objcopy -O binary --only-section=.data   "$BIN" /dev/stdout | sha256sum | cut -c1-64)" = "80b19f955e72a2fbc2891bd5686d4180a2969036ed7a8004c59e153a34a0e5ee" && \
-    echo "Binary sections (.text, .rodata, .data) are byte-identical to cookbook build."
-
 # Fetch official tokenizer.json and chat_template.jinja (verified sha256)
 ARG HF_REV=ed40e7da625f594fc9c4990f5f66be24873c22d7
 RUN mkdir -p /app/meta && \
@@ -50,11 +31,20 @@ RUN mkdir -p /app/meta && \
     curl -fsSL "https://huggingface.co/thinkingmachines/Inkling-2-Mini/resolve/${HF_REV}/chat_template.jinja" -o /app/meta/chat_template.jinja && \
     echo "53a9035f3255945704b5857657cfb00c1165090c0641c4f782a0cbf268cc16dc  /app/meta/chat_template.jinja" | sha256sum -c -
 
-# Allow binding 0.0.0.0 inside container for port forwarding
-RUN cp /app/tf/tools/xpu/inkling2_serve.py /app/inkling2_serve.py && \
-    sed -i 's/ap.add_argument("--port", type=int, required=True)/ap.add_argument("--host", default="0.0.0.0")\n    ap.add_argument("--port", type=int, required=True)/' /app/inkling2_serve.py && \
-    sed -i 's/("127.0.0.1", args.port)/(args.host, args.port)/g' /app/inkling2_serve.py && \
-    sed -i 's/listening on 127.0.0.1:/listening on {args.host}:/' /app/inkling2_serve.py
+# Clone pinned upstream TensorFold snapshot
+ARG TF_TAG=b70-inkling2-mini-20261121
+RUN git clone --depth 1 --branch "${TF_TAG}" https://github.com/SergiioB/TensorFold.git /app/tf
+
+FROM deps AS builder
+
+WORKDIR /app
+COPY patches/ /tmp/patches/
+
+# Apply local Xe2 XMX / DP4A / prefix-cache / vision patch series and build xpu-inkling2
+RUN cd /app/tf && \
+    git -c user.name="builder" -c user.email="builder@local" am /tmp/patches/*.patch && \
+    /opt/zig/zig build xpu-inkling2 -Doptimize=ReleaseFast --prefix /app/out && \
+    cp /app/tf/tools/xpu/inkling2_serve.py /app/inkling2_serve.py
 
 FROM ubuntu:26.04 AS runtime
 
@@ -63,15 +53,15 @@ ENV PATH="/opt/venv/bin:${PATH}"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates python3 python3-venv \
-    libze1 libze-intel-gpu1 \
+    libze1 libze-intel-gpu1 libigc2 libigdfcl2 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m venv /opt/venv && \
-    /opt/venv/bin/pip install --no-cache-dir transformers tokenizers jinja2
+    /opt/venv/bin/pip install --no-cache-dir transformers tokenizers jinja2 pillow numpy
 
 WORKDIR /app
+COPY --from=deps /app/meta /app/meta
 COPY --from=builder /app/out/bin/xpu-inkling2 /app/bin/xpu-inkling2
-COPY --from=builder /app/meta /app/meta
 COPY --from=builder /app/inkling2_serve.py /app/inkling2_serve.py
 
 EXPOSE 8080

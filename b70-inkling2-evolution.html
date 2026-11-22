@@ -1,0 +1,3186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Inkling-2-Mini on Intel Arc Pro B70 — 84.9 tok/s, 384K Ctx, 52ms XMX Vision &amp; 90ms TTFT</title>
+<style>
+  :root {
+    --bg-outer: #050811;
+    --bg-slide: #0a101d;
+    --bg-card: #10192b;
+    --bg-card-alt: #142038;
+    --border: #1e2e4d;
+    --border-bright: #2c436e;
+    --text-primary: #f1f5f9;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --cyan: #00d4ff;
+    --cyan-dim: rgba(0, 212, 255, 0.14);
+    --blue: #38bdf8;
+    --emerald: #10b981;
+    --emerald-bright: #34d399;
+    --emerald-dim: rgba(16, 185, 129, 0.14);
+    --amber: #f59e0b;
+    --amber-bright: #fbbf24;
+    --amber-dim: rgba(245, 158, 11, 0.14);
+    --rose: #f43f5e;
+    --rose-bright: #fb7185;
+    --rose-dim: rgba(244, 63, 94, 0.14);
+    --violet: #a78bfa;
+    --violet-dim: rgba(139, 92, 246, 0.15);
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg-outer);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    user-select: text;
+  }
+
+  /* Viewport Stage */
+  #stage {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background:
+      radial-gradient(circle at 18% 12%, rgba(0, 212, 255, 0.08), transparent 42%),
+      radial-gradient(circle at 82% 88%, rgba(16, 185, 129, 0.06), transparent 40%),
+      var(--bg-outer);
+  }
+
+  #deck-scaler {
+    position: relative;
+    width: 1280px;
+    height: 720px;
+    transform-origin: center center;
+    box-shadow: 0 28px 90px rgba(0, 0, 0, 0.72), 0 0 0 1px rgba(255, 255, 255, 0.06);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--bg-slide);
+  }
+
+  /* Slides */
+  .slide {
+    position: absolute;
+    inset: 0;
+    width: 1280px;
+    height: 720px;
+    padding: 36px 46px 48px 46px;
+    display: flex;
+    flex-direction: column;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(18px);
+    transition: opacity 0.22s ease, transform 0.22s ease;
+    background:
+      radial-gradient(ellipse at 92% 6%, rgba(0, 212, 255, 0.07), transparent 42%),
+      linear-gradient(180deg, #0b1222 0%, #090e1a 100%);
+    overflow: hidden;
+  }
+
+  .slide.active {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateX(0);
+    z-index: 2;
+  }
+
+  /* Slide Header */
+  .slide-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    margin-bottom: 18px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .slide-kicker {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--cyan);
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .slide-kicker .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--cyan);
+    display: inline-block;
+    box-shadow: 0 0 8px var(--cyan);
+  }
+
+  .slide-title {
+    font-size: 27px;
+    font-weight: 750;
+    letter-spacing: -0.02em;
+    color: var(--text-primary);
+    line-height: 1.15;
+  }
+
+  .slide-subtitle {
+    font-size: 13.5px;
+    color: var(--text-secondary);
+    margin-top: 3px;
+  }
+
+  .header-metric {
+    text-align: right;
+    background: var(--bg-card);
+    border: 1px solid var(--border-bright);
+    border-radius: 8px;
+    padding: 7px 14px;
+    flex-shrink: 0;
+  }
+
+  .header-metric .val {
+    font-family: var(--font-mono);
+    font-size: 20px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--emerald-bright);
+    line-height: 1.1;
+  }
+
+  .header-metric .lbl {
+    font-size: 10.5px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-top: 2px;
+  }
+
+  /* Slide Body */
+  .slide-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    min-height: 0;
+  }
+
+  /* Slide Footer */
+  .slide-footer {
+    position: absolute;
+    left: 46px;
+    right: 46px;
+    bottom: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--text-muted);
+    letter-spacing: 0.03em;
+    pointer-events: none;
+  }
+
+  /* Layout Grids */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; flex: 1; min-height: 0; }
+  .grid-2-wide-l { display: grid; grid-template-columns: 1.25fr 0.95fr; gap: 16px; flex: 1; min-height: 0; }
+  .grid-2-wide-r { display: grid; grid-template-columns: 0.92fr 1.28fr; gap: 16px; flex: 1; min-height: 0; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .col { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+
+  /* Cards */
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 15px 17px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .card.grow { flex: 1; }
+  .card.accent-cyan { border-color: rgba(0, 212, 255, 0.35); background: linear-gradient(180deg, rgba(0, 212, 255, 0.05), var(--bg-card)); }
+  .card.accent-emerald { border-color: rgba(16, 185, 129, 0.38); background: linear-gradient(180deg, rgba(16, 185, 129, 0.06), var(--bg-card)); }
+  .card.accent-amber { border-color: rgba(245, 158, 11, 0.38); background: linear-gradient(180deg, rgba(245, 158, 11, 0.06), var(--bg-card)); }
+  .card.accent-rose { border-color: rgba(244, 63, 94, 0.38); background: linear-gradient(180deg, rgba(244, 63, 94, 0.06), var(--bg-card)); }
+  .card.accent-violet { border-color: rgba(139, 92, 246, 0.38); background: linear-gradient(180deg, rgba(139, 92, 246, 0.06), var(--bg-card)); }
+
+  .card-title {
+    font-size: 13px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--cyan);
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .card-title.emerald { color: var(--emerald-bright); }
+  .card-title.amber { color: var(--amber-bright); }
+  .card-title.rose { color: var(--rose-bright); }
+  .card-title.violet { color: var(--violet); }
+
+  /* Pills & Badges */
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 5px;
+    letter-spacing: 0.03em;
+    white-space: nowrap;
+  }
+
+  .badge.cyan { background: var(--cyan-dim); color: var(--cyan); border: 1px solid rgba(0,212,255,0.28); }
+  .badge.emerald { background: var(--emerald-dim); color: var(--emerald-bright); border: 1px solid rgba(16,185,129,0.3); }
+  .badge.amber { background: var(--amber-dim); color: var(--amber-bright); border: 1px solid rgba(245,158,11,0.32); }
+  .badge.rose { background: var(--rose-dim); color: var(--rose-bright); border: 1px solid rgba(244,63,94,0.32); }
+  .badge.violet { background: var(--violet-dim); color: var(--violet); border: 1px solid rgba(139,92,246,0.32); }
+  .badge.neutral { background: rgba(148,163,184,0.12); color: var(--text-secondary); border: 1px solid var(--border); }
+
+  /* Typography helpers */
+  code, .mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  code {
+    font-size: 0.9em;
+    background: rgba(148, 163, 184, 0.12);
+    color: #bae6fd;
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+
+  .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-weight: 700; }
+  .c-cyan { color: var(--cyan); }
+  .c-emerald { color: var(--emerald-bright); }
+  .c-amber { color: var(--amber-bright); }
+  .c-rose { color: var(--rose-bright); }
+  .c-violet { color: var(--violet); }
+  .c-muted { color: var(--text-secondary); }
+
+  ul.clean {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  ul.clean li {
+    position: relative;
+    padding-left: 16px;
+    font-size: 13.2px;
+    line-height: 1.44;
+    color: #dbe4f0;
+  }
+
+  ul.clean li::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 7px;
+    width: 6px;
+    height: 6px;
+    border-radius: 2px;
+    background: var(--cyan);
+  }
+
+  ul.clean.emerald li::before { background: var(--emerald-bright); }
+  ul.clean.amber li::before { background: var(--amber-bright); }
+  ul.clean.rose li::before { background: var(--rose-bright); }
+  ul.clean.violet li::before { background: var(--violet); }
+
+  /* KPI Strip */
+  .kpi-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+  }
+
+  .kpi-box {
+    background: var(--bg-card-alt);
+    border: 1px solid var(--border-bright);
+    border-radius: 9px;
+    padding: 12px 14px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .kpi-box::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 3px;
+    background: var(--cyan);
+  }
+  .kpi-box.emerald::before { background: var(--emerald-bright); }
+  .kpi-box.amber::before { background: var(--amber-bright); }
+  .kpi-box.rose::before { background: var(--rose-bright); }
+  .kpi-box.violet::before { background: var(--violet); }
+
+  .kpi-val {
+    font-family: var(--font-mono);
+    font-size: 24px;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+    color: var(--text-primary);
+  }
+
+  .kpi-lbl {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-top: 4px;
+  }
+
+  .kpi-sub {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 3px;
+  }
+
+  /* Compact Tables */
+  table.data {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+
+  table.data th {
+    text-align: left;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--text-muted);
+    padding: 5px 8px;
+    border-bottom: 1px solid var(--border-bright);
+  }
+
+  table.data td {
+    padding: 5px 8px;
+    border-bottom: 1px solid rgba(30, 46, 77, 0.55);
+    color: #e2e8f0;
+    vertical-align: middle;
+  }
+
+  table.data tr:last-child td { border-bottom: none; }
+  table.data td.r, table.data th.r { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+  /* Code Box */
+  .code-block {
+    background: #060a14;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 10px 13px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    line-height: 1.48;
+    color: #cbd5e1;
+    overflow-x: auto;
+    white-space: pre;
+  }
+
+  .code-block .kw { color: #38bdf8; }
+  .code-block .fn { color: #34d399; }
+  .code-block .num { color: #fbbf24; font-weight: 600; }
+  .code-block .cm { color: #64748b; }
+
+  /* Spec grid */
+  .spec-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 14px;
+  }
+
+  .spec-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding-bottom: 5px;
+    border-bottom: 1px dashed rgba(30, 46, 77, 0.8);
+    font-size: 12.5px;
+  }
+
+  .spec-item .k { color: var(--text-secondary); }
+  .spec-item .v { font-family: var(--font-mono); font-weight: 600; color: var(--text-primary); }
+
+  /* Hero Title Slide */
+  .slide-title-hero {
+    justify-content: space-between;
+    background:
+      radial-gradient(circle at 82% 20%, rgba(0, 212, 255, 0.14), transparent 44%),
+      radial-gradient(circle at 14% 84%, rgba(16, 185, 129, 0.11), transparent 40%),
+      linear-gradient(145deg, #070d1a 0%, #0b1326 60%, #080e1c 100%);
+  }
+
+  .hero-bg-svg {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0.55;
+  }
+
+  .hero-content {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    flex: 1;
+    gap: 20px;
+  }
+
+  .hero-h1 {
+    font-size: 48px;
+    font-weight: 800;
+    line-height: 1.08;
+    letter-spacing: -0.03em;
+    max-width: 960px;
+  }
+
+  .hero-h1 .grad {
+    background: linear-gradient(90deg, #00d4ff 0%, #34d399 58%, #fbbf24 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .hero-sub {
+    font-size: 18px;
+    color: var(--text-secondary);
+    max-width: 860px;
+    line-height: 1.45;
+  }
+
+  .hero-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  /* Chart containers */
+  .chart-wrap {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 0;
+    width: 100%;
+    position: relative;
+  }
+
+  .chart-wrap svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+
+  /* Tooltip */
+  #tooltip {
+    position: fixed;
+    z-index: 1000;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.12s ease;
+    background: rgba(8, 13, 25, 0.96);
+    border: 1px solid var(--cyan);
+    border-radius: 7px;
+    padding: 8px 11px;
+    font-size: 12px;
+    color: var(--text-primary);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
+    max-width: 280px;
+  }
+
+  #tooltip .tt-title { font-weight: 700; color: var(--cyan); margin-bottom: 3px; font-family: var(--font-mono); font-size: 11.5px; }
+  #tooltip .tt-body { color: #dbe4f0; line-height: 1.4; }
+
+  /* Bottom HUD Navigation */
+  #hud {
+    position: fixed;
+    bottom: 14px;
+    right: 20px;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(10, 16, 29, 0.85);
+    backdrop-filter: blur(10px);
+    border: 1px solid var(--border-bright);
+    border-radius: 999px;
+    padding: 5px 10px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+  }
+
+  #hud button {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-family: var(--font-mono);
+    transition: background 0.15s, color 0.15s;
+  }
+
+  #hud button:hover { background: rgba(0, 212, 255, 0.16); color: var(--cyan); }
+  #hud .counter {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-primary);
+    padding: 0 6px;
+    min-width: 52px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Progress Bar */
+  #progress-track {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 3px;
+    background: rgba(30, 46, 77, 0.5);
+    z-index: 101;
+  }
+
+  #progress-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, var(--cyan), var(--emerald-bright));
+    transition: width 0.24s ease;
+  }
+
+  /* Overview Grid Overlay */
+  #overview {
+    position: fixed;
+    inset: 0;
+    z-index: 500;
+    background: rgba(5, 8, 17, 0.95);
+    backdrop-filter: blur(12px);
+    display: none;
+    flex-direction: column;
+    padding: 28px 36px;
+    overflow-y: auto;
+  }
+
+  #overview.open { display: flex; }
+
+  .ov-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .ov-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 16px;
+  }
+
+  .ov-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+    cursor: pointer;
+    transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-height: 118px;
+  }
+
+  .ov-card:hover {
+    transform: translateY(-2px);
+    border-color: var(--cyan);
+    box-shadow: 0 8px 24px rgba(0, 212, 255, 0.14);
+  }
+
+  .ov-card.current {
+    border-color: var(--emerald-bright);
+    box-shadow: 0 0 0 1px var(--emerald-bright);
+  }
+
+  .ov-num { font-family: var(--font-mono); font-size: 11px; color: var(--cyan); font-weight: 700; }
+  .ov-title { font-size: 14px; font-weight: 700; color: var(--text-primary); line-height: 1.25; }
+  .ov-sub { font-size: 11.5px; color: var(--text-secondary); line-height: 1.35; }
+
+  /* Hoverable SVG elements */
+  .bar-hover { cursor: pointer; transition: filter 0.14s ease, opacity 0.14s ease; }
+  .bar-hover:hover { filter: brightness(1.22); }
+
+  /* Callout Strip */
+  .callout {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: rgba(0, 212, 255, 0.07);
+    border: 1px solid rgba(0, 212, 255, 0.28);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 13px;
+    line-height: 1.4;
+    color: #e2e8f0;
+  }
+
+  .callout.emerald { background: rgba(16, 185, 129, 0.08); border-color: rgba(16, 185, 129, 0.32); }
+  .callout.amber { background: rgba(245, 158, 11, 0.08); border-color: rgba(245, 158, 11, 0.34); }
+  .callout.rose { background: rgba(244, 63, 94, 0.08); border-color: rgba(244, 63, 94, 0.32); }
+
+  /* Print / PDF support */
+  @media print {
+    @page { size: 1280px 720px; margin: 0; }
+    html, body {
+      width: 1280px;
+      height: auto;
+      overflow: visible !important;
+      background: #0a101d !important;
+      -webkit-print-color-adjust: exact !important;
+      print-color-adjust: exact !important;
+    }
+    #hud, #progress-track, #overview, #tooltip { display: none !important; }
+    #stage { position: static; display: block; background: none; }
+    #deck-scaler {
+      width: 1280px;
+      height: auto;
+      transform: none !important;
+      box-shadow: none;
+      border-radius: 0;
+      overflow: visible;
+    }
+    .slide {
+      position: relative !important;
+      opacity: 1 !important;
+      transform: none !important;
+      pointer-events: auto !important;
+      page-break-after: always;
+      break-after: page;
+    }
+    .slide:last-child { page-break-after: auto; break-after: auto; }
+  }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <div id="deck-scaler">
+
+    <!-- ==================== SLIDE 1: TITLE ==================== -->
+    <section class="slide slide-title-hero active" data-title="Title: Chasing 70+ tok/s on Arc Pro B70" data-sub="Inkling-2-Mini (26B MoE) on Intel Xe2 / BMG-G31">
+      <svg class="hero-bg-svg" viewBox="0 0 1280 720" preserveAspectRatio="xMidYMid slice">
+        <defs>
+          <pattern id="xeGrid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1b2a47" stroke-width="0.7" />
+          </pattern>
+          <linearGradient id="heroBeam" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stop-color="#00d4ff" stop-opacity="0.22"/>
+            <stop offset="100%" stop-color="#10b981" stop-opacity="0"/>
+          </linearGradient>
+        </defs>
+        <rect width="1280" height="720" fill="url(#xeGrid)"/>
+        <!-- Stylized 32 Xe-core array (8x4) in upper right -->
+        <g transform="translate(910, 62)" opacity="0.62">
+          <rect x="-12" y="-12" width="320" height="176" rx="12" fill="rgba(10,16,29,0.75)" stroke="#233759" stroke-width="1.2"/>
+          <text x="6" y="7" fill="#64748b" font-family="monospace" font-size="10" letter-spacing="2">BMG-G31 · 32 XE2-CORES · XMX + DP4A</text>
+          <g id="hero-xecores"></g>
+        </g>
+        <polygon points="0,720 420,420 1280,720" fill="url(#heroBeam)" opacity="0.35"/>
+      </svg>
+
+      <div class="hero-content">
+        <div class="hero-tags">
+          <span class="badge cyan">INTEL ARC PRO B70 · 32 GB Xe2</span>
+          <span class="badge emerald">TENSORFOLD XPU · LEVEL ZERO + OPENCL C</span>
+          <span class="badge amber">THINKING MACHINES · INKLING-2-MINI</span>
+          <span class="badge violet">NATIVE Xe2 XMX VISION · 52 ms @ 640px</span>
+        </div>
+
+        <h1 class="hero-h1">
+          Chasing 70+ tok/s<br>
+          <span class="grad">(Reaching 84.9 tok/s · 384K Ctx · 52 ms Vision)</span>
+        </h1>
+
+        <p class="hero-sub">
+          Full-stack kernel engineering, Xe2 XMX DPAS FlashAttention, native <strong>XMX Multimodal Vision</strong> (<code>mmproj-F16.gguf</code>), hardware DP4A, 9.0-wave alignment, <strong>384K-token VRAM scaling</strong>, and <strong>100% bit-exact</strong> Dual GPU Prefix Caching for <strong style="color:#f1f5f9">Inkling-2-Mini</strong> on <strong style="color:#f1f5f9">Intel Arc Pro B70</strong>.
+        </p>
+
+        <div class="kpi-row" id="hero-kpis">
+          <!-- Populated from METRICS -->
+        </div>
+
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px; padding-top:14px; border-top:1px solid rgba(30,46,77,0.75); font-family:var(--font-mono); font-size:11.5px; color:var(--text-secondary);">
+          <span>Model: Inkling-2-Mini-UD-Q4_K_XL (16.41 GiB · 26B MoE) + mmproj-F16 (610 MB · 318M ViT)</span>
+          <span>GPU: 32 Xe-cores · 2800 MHz · 275 W cap · ~608 GB/s</span>
+        </div>
+      </div>
+
+      <div class="slide-footer">
+        <span>INKLING-2-MINI × INTEL ARC PRO B70 (Xe2)</span>
+        <span>Press ← / → or Space · G for Overview Grid · F for Fullscreen</span>
+      </div>
+    </section>
+
+    <!-- ==================== SLIDE 2: WORKLOAD & HARDWARE ==================== -->
+    <section class="slide" data-title="Workload & Hardware Profile" data-sub="Inkling-2-Mini 26B MoE + Hermes Agent + Arc Pro B70 Specs">
+      <div class="slide-header">
+        <div>
+          <div class="slide-kicker"><span class="dot"></span>01 · System Context</div>
+          <h2 class="slide-title">Workload &amp; Hardware Profile</h2>
+          <p class="slide-subtitle">Looped 26B MoE architecture serving long-context Hermes Agent workloads on Xe2 silicon</p>
+        </div>
+        <div class="header-metric">
+          <div class="val">16.41 GiB</div>
+          <div class="lbl">Fits 32 GB VRAM w/ 64K KV</div>
+        </div>
+      </div>
+
+      <div class="slide-body">
+        <div class="grid-2">
+          <!-- Left: Model + Hermes -->
+          <div class="col">
+            <div class="card accent-cyan grow">
+              <div class="card-title">Inkling-2-Mini Architecture <span class="badge cyan">26B MoE</span></div>
+              <div class="spec-grid" style="margin-bottom:12px;">
+                <div class="spec-item"><span class="k">Format / Size</span><span class="v">UD-Q4_K_XL · 16.41 GiB</span></div>
+                <div class="spec-item"><span class="k">Experts</span><span class="v">128 total · Top-8 active</span></div>
+                <div class="spec-item"><span class="k">Looped Depth</span><span class="v">L6–17 × 3 = 48 visits/tok</span></div>
+                <div class="spec-item"><span class="k">Attention Mix</span><span class="v">40 Sliding + 8 Global</span></div>
+                <div class="spec-item"><span class="k">Dense / Attn / LM</span><span class="v">34-byte Q8_0 blocks</span></div>
+                <div class="spec-item"><span class="k">MoE Expert Weights</span><span class="v">NVFP4 (E2M1 + UE4M3)</span></div>
+              </div>
+
+              <!-- Looped Topology Mini SVG -->
+              <div style="background:#070c18; border:1px solid var(--border); border-radius:8px; padding:10px 12px; margin-bottom:10px;">
+                <div style="font-family:var(--font-mono); font-size:10px; color:var(--text-muted); margin-bottom:6px; letter-spacing:0.08em;">TOKEN EXECUTION GRAPH · 48 LAYER VISITS PER STEP</div>
+                <svg viewBox="0 0 540 84" style="width:100%; height:72px;">
+                  <defs>
+                    <marker id="arrC" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+                      <path d="M 0 1 L 10 5 L 0 9 z" fill="#38bdf8"/>
+                    </marker>
+                    <marker id="arrA" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+                      <path d="M 0 1 L 10 5 L 0 9 z" fill="#fbbf24"/>
+                    </marker>
+                  </defs>
+                  <rect x="4" y="22" width="66" height="36" rx="6" fill="#13223d" stroke="#38bdf8" stroke-width="1.2"/>
+                  <text x="37" y="38" text-anchor="middle" fill="#f1f5f9" font-family="monospace" font-size="11" font-weight="700">Embed</text>
+                  <text x="37" y="51" text-anchor="middle" fill="#94a3b8" font-family="monospace" font-size="9">Q8_0</text>
+                  <line x1="70" y1="40" x2="90" y2="40" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arrC)"/>
+
+                  <rect x="92" y="22" width="76" height="36" rx="6" fill="#13223d" stroke="#38bdf8" stroke-width="1.2"/>
+                  <text x="130" y="38" text-anchor="middle" fill="#f1f5f9" font-family="monospace" font-size="11" font-weight="700">L0 – L5</text>
+                  <text x="130" y="51" text-anchor="middle" fill="#94a3b8" font-family="monospace" font-size="9">6 visits</text>
+                  <line x1="168" y1="40" x2="192" y2="40" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arrC)"/>
+
+                  <rect x="194" y="16" width="144" height="48" rx="8" fill="rgba(245,158,11,0.12)" stroke="#fbbf24" stroke-width="1.6"/>
+                  <text x="266" y="36" text-anchor="middle" fill="#fbbf24" font-family="monospace" font-size="12" font-weight="700">L6 – L17 (×3 Loop)</text>
+                  <text x="266" y="52" text-anchor="middle" fill="#fde68a" font-family="monospace" font-size="9.5">36 visits + BF16 ctl + mix3</text>
+                  <!-- Loop arc -->
+                  <path d="M 318 16 C 318 2, 214 2, 214 14" fill="none" stroke="#fbbf24" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#arrA)"/>
+
+                  <line x1="338" y1="40" x2="362" y2="40" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arrC)"/>
+                  <rect x="364" y="22" width="78" height="36" rx="6" fill="#13223d" stroke="#38bdf8" stroke-width="1.2"/>
+                  <text x="403" y="38" text-anchor="middle" fill="#f1f5f9" font-family="monospace" font-size="11" font-weight="700">L18–L23</text>
+                  <text x="403" y="51" text-anchor="middle" fill="#94a3b8" font-family="monospace" font-size="9">6 visits</text>
+                  <line x1="442" y1="40" x2="462" y2="40" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arrC)"/>
+
+                  <rect x="464" y="22" width="72" height="36" rx="6" fill="rgba(16,185,129,0.14)" stroke="#34d399" stroke-width="1.3"/>
+                  <text x="500" y="38" text-anchor="middle" fill="#34d399" font-family="monospace" font-size="11" font-weight="700">LM Head</text>
+                  <text x="500" y="51" text-anchor="middle" fill="#a7f3d0" font-family="monospace" font-size="9">492 MB</text>
+                </svg>
+              </div>
+
+              <div class="callout amber" style="margin-top:auto;">
+                <span class="badge amber">HERMES AGENT TARGET</span>
+                <span><strong>~14.6K Turn-1 prompt</strong> (system tools + repo context) with <strong>64K+ KV cache</strong>. Requires both fast decode (&gt;70 tok/s) <em>and</em> sub-minute prompt ingestion.</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right: Hardware + Container -->
+          <div class="col">
+            <div class="card accent-emerald">
+              <div class="card-title emerald">Intel Arc Pro B70 Hardware <span class="badge emerald">BMG-G31 · Xe2</span></div>
+              <div class="spec-grid">
+                <div class="spec-item"><span class="k">Compute Units</span><span class="v c-cyan">32 Xe2-cores (SIMD16)</span></div>
+                <div class="spec-item"><span class="k">VRAM Capacity</span><span class="v">32 GB GDDR6</span></div>
+                <div class="spec-item"><span class="k">Memory Bus / BW</span><span class="v c-emerald">256-bit · ~608 GB/s</span></div>
+                <div class="spec-item"><span class="k">Clock / Power</span><span class="v">2800 MHz · 275 W cap</span></div>
+                <div class="spec-item"><span class="k">Matrix Engines</span><span class="v c-amber">XMX DPAS (k=16 FP16)</span></div>
+                <div class="spec-item"><span class="k">INT8 Vector ISA</span><span class="v c-violet">HW DP4A (dot_acc_sat)</span></div>
+              </div>
+              <div style="margin-top:11px; font-size:12.5px; color:var(--text-secondary); line-height:1.45;">
+                <strong style="color:var(--text-primary)">Why B70 is a unique fit:</strong> 32 GB VRAM comfortably holds the 16.41 GiB model plus full 64K KV cache, while 608 GB/s GDDR6 + XMX DPAS + DP4A enable both bandwidth-bound decode and compute-bound long prefill — <em>if</em> kernels speak native Xe2 ISA.
+              </div>
+            </div>
+
+            <div class="card grow">
+              <div class="card-title">Clean Containerized Engineering Discipline <span class="badge neutral">Zero Host Pollution</span></div>
+              <ul class="clean">
+                <li><strong>Multi-stage Podman <code>Containerfile</code>:</strong> All toolchains (<code>intel-ocloc</code> IGC compiler, Level Zero runtime, Zig <code>0.17.0</code>, Vulkan/llama.cpp audit builds) stay strictly isolated from the host OS.</li>
+                <li><strong>Deterministic, fast iteration:</strong> Layer-cached builds give <strong>~15 s incremental rebuilds</strong> for OpenCL C kernels and Zig host orchestration.</li>
+                <li><strong>Strict verification gates:</strong> Every optimization pass is gated by GPU hardware timestamp profiling <em>and</em> greedy token parity against the reference path (24/24 → 64/64 bit-exact).</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="slide-footer">
+        <span>01 · WORKLOAD &amp; HARDWARE PROFILE</span>
+        <span>Slide 2 / 17</span>
+      </div>
+    </section>
+
+    <!-- ==================== SLIDE 3: PHASE 0 VULKAN AUDIT ==================== -->
+    <section class="slide" data-title="Phase 0: Fused Vulkan Audit" data-sub="Why llama.cpp Vulkan capped at 31.74 → 34.61 tok/s on Xe2">
+      <div class="slide-header">
+        <div>
+          <div class="slide-kicker"><span class="dot"></span>02 · Phase 0 Diagnosis</div>
+          <h2 class="slide-title">Fused Vulkan Audit (<code>vengeful180-dot/llama.cpp</code>)</h2>
+          <p class="slide-subtitle">Quantifying exactly why Vulkan stalled at 34.6 tok/s — and finding a latent Xe2 SIMD16 correctness bug</p>
+        </div>
+        <div class="header-metric" style="border-color:rgba(244,63,94,0.45);">
+          <div class="val c-rose">34.61 tok/s</div>
+          <div class="lbl">Vulkan Ceiling (+9% vs 31.74)</div>
+        </div>
+      </div>
+
+      <div class="slide-body">
+        <div class="grid-2-wide-l">
+          <!-- Left: Vulkan Decode Bottleneck Chart -->
+          <div class="card accent-rose">
+            <div class="card-title rose">Vulkan Decode Profile (~30.4 ms/token) <span class="badge rose">Q8_0 Bottleneck</span></div>
+            <div class="chart-wrap">
+              <svg viewBox="0 0 600 280">
+                <!-- Stacked bar of 30.4ms -->
+                <text x="12" y="22" fill="#94a3b8" font-family="monospace" font-size="11">TIME BREAKDOWN PER DECODE TOKEN (VULKAN)</text>
+                <rect x="12" y="34" width="286" height="38" rx="5" fill="#f43f5e"/>
+                <text x="155" y="51" text-anchor="middle" fill="#fff" font-family="monospace" font-size="12" font-weight="700">Q8_0 scalar int16 GEMV</text>
+                <text x="155" y="65" text-anchor="middle" fill="#ffe4e6" font-family="monospace" font-size="10.5">15.20 ms (50.0% of decode!)</text>
+
+                <rect x="302" y="34" width="82" height="38" rx="5" fill="#10b981"/>
+                <text x="343" y="51" text-anchor="middle" fill="#fff" font-family="monospace" font-size="10.5" font-weight="700">NVFP4</text>
+                <text x="343" y="65" text-anchor="middle" fill="#d1fae5" font-family="monospace" font-size="9.5">4.34 ms</text>
+
+                <rect x="388" y="34" width="198" height="38" rx="5" fill="#334155"/>
+                <text x="487" y="51" text-anchor="middle" fill="#e2e8f0" font-family="monospace" font-size="11" font-weight="600">Attn + Mix + Queue/Other</text>
+                <text x="487" y="65" text-anchor="middle" fill="#94a3b8" font-family="monospace" font-size="10">~10.9 ms (35.7%)</text>
+
+                <!-- Bandwidth Comparison -->
+                <text x="12" y="106" fill="#94a3b8" font-family="monospace" font-size="11">ACHIEVED DRAM BANDWIDTH VS 608 GB/s PEAK</text>
+                <!-- Peak line -->
+                <line x1="556" y1="118" x2="556" y2="246" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="4 3"/>
+                <text x="556" y="262" text-anchor="middle" fill="#38bdf8" font-family="monospace" font-size="10.5" font-weight="700">608 GB/s Peak</text>
+
+                <!-- Row 1: NVFP4 -->
+                <text x="12" y="140" fill="#e2e8f0" font-family="monospace" font-size="11.5">NVFP4 MUL_MAT_ID</text>
+                <rect x="170" y="126" width="293" height="22" rx="4" fill="#10b981"/>
+                <text x="455" y="141" text-anchor="end" fill="#06121b" font-family="monospace" font-size="11.5" font-weight="800">461.7 GB/s (75.9%)</text>
+
+                <!-- Row 2: Q8_0 best -->
+                <text x="12" y="182" fill="#e2e8f0" font-family="monospace" font-size="11.5">Q8_0 GEMV (high)</text>
+                <rect x="170" y="168" width="113" height="22" rx="4" fill="#f59e0b"/>
+                <text x="291" y="183" fill="#fbbf24" font-family="monospace" font-size="12" font-weight="700">178 GB/s (29.3%)</text>
+
+                <!-- Row 3: Q8_0 worst -->
+                <text x="12" y="224" fill="#e2e8f0" font-family="monospace" font-size="11.5">Q8_0 GEMV (low)</text>
+                <rect x="170" y="210" width="39" height="22" rx="4" fill="#f43f5e"/>
+                <text x="218" y="225" fill="#fb7185" font-family="monospace" font-size="12" font-weight="700">62 GB/s (10.2% · scalar int16)</text>
+
+                <!-- Axis baseline -->
+                <line x1="170" y1="118" x2="170" y2="246" stroke="#475569" stroke-width="1"/>
+              </svg>
+            </div>
+            <div style="font-size:12.5px; color:var(--text-secondary); margin-top:4px;">
+              <strong style="color:var(--rose-bright)">Core finding:</strong> Vulkan's NVFP4 MoE path was already healthy (<code>461.7 GB/s</code>), but scalar <code>int16</code> Q8_0 GEMV shaders starved memory at <code>62–178 GB/s</code> and burned half the frame budget.
+            </div>
+          </div>
+
+          <!-- Right: Findings & Root Causes -->
+          <div class="col">
+            <div class="card">
+              <div class="card-title">Async Queue Tuning <span class="badge amber">+9.0% Quick Win</span></div>
+              <ul class="clean amber">
+                <li><strong>Default Vulkan:</strong> <code>31.74 tok/s</code> — async submission added timeline/semaphore overhead across hundreds of small MoE dispatches.</li>
+                <li><strong><code>GGML_VK_DISABLE_ASYNC=1</code>:</strong> jumped to <strong><code>34.61 tok/s</code></strong>, confirming dispatch overhead + Q8_0 shader inefficiency as the twin ceilings.</li>
+              </ul>
+            </div>
+
+            <div class="card accent-amber grow">
+              <div class="card-title amber"><code>test-backend-ops</code> Correctness Audit <span class="badge rose">33 / 23,310 Failed</span></div>
+              <ul class="clean amber" style="margin-bottom:10px;">
+                <li><strong>23,277 / 23,310</strong> ops passed — <em>all 33 failures</em> were isolated to <code>DEPTH_MIX</code>.</li>
+                <li><strong>Root cause on Xe2:</strong> Shader used <code>BLOCK = 512</code> and assumed <code>gl_NumSubgroups &lt;= gl_SubgroupSize</code> for single-wave shared-memory reduction.</li>
+                <li>On NVIDIA/AMD (SIMD32), <code>512 / 32 = 16 &lt;= 32</code> passes silently. On Intel Xe2 (<strong>SIMD16</strong>), <code>512 / 16 = 32 &gt; 16</code> — half the subgroups were silently dropped!</li>
+              </ul>
+              <div class="code-block" style="margin-top:auto;"><span class="cm">// Broken assumption on Intel Xe2 SIMD16:</span>
+<span class="kw">const</span> BLOCK = <span class="num">512</span>;  <span class="cm">// SIMD32 → 16 sgs (OK)</span>
+                     <span class="cm">// Xe2 SIMD16 → 32 sgs &gt; 16 (BUG!)</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="slide-footer">
+        <span>02 · PHASE 0 — FUSED VULKAN AUDIT</span>
+        <span>Slide 3 / 17</span>
+      </div>
+    </section>
+
+    <!-- ==================== SLIDE 4: PIVOT TO TENSORFOLD XPU ==================== -->
+    <section class="slide" data-title="Pivot to TensorFold XPU" data-sub="Native Level Zero + OpenCL C doubles Vulkan immediately">
+      <div class="slide-header">
+        <div>
+          <div class="slide-kicker"><span class="dot"></span>03 · Architectural Pivot</div>
+          <h2 class="slide-title">Pivot to TensorFold XPU (Level Zero + OpenCL C)</h2>
+          <p class="slide-subtitle">Direct access to Intel Xe2 hardware intrinsics (XMX DPAS, DP4A, subgroup shuffles, explicit GRF mode) doubled decode on day one</p>
+        </div>
+        <div class="header-metric">
+          <div class="val">73.40 tok/s</div>
+          <div class="lbl">Warm Baseline (2.12× Vulkan)</div>
+        </div>
+      </div>
+
+      <div class="slide-body">
+        <div class="grid-2">
+          <!-- Left: Architecture stack -->
+          <div class="card accent-cyan">
+            <div class="card-title">Isolated <code>tensorfold/</code> Container Stack <span class="badge cyan">~15s Rebuilds</span></div>
+            <div class="chart-wrap" style="max-height:255px;">
+              <svg viewBox="0 0 540 245">
+                <!-- Stage 1 -->
+                <rect x="16" y="10" width="508" height="58" rx="8" fill="#121f38" stroke="#38bdf8" stroke-width="1.3"/>
+                <text x="32" y="33" fill="#38bdf8" font-family="monospace" font-size="12" font-weight="700">STAGE 1 · BASE RUNTIME (Cached)</text>
+                <text x="32" y="53" fill="#cbd5e1" font-family="sans-serif" font-size="12.5">ubuntu:26.04 + Intel NEO / Level Zero ICD + intel-ocloc (BMG-G31 AOT)</text>
+                <text x="508" y="39" text-anchor="end" fill="#64748b" font-family="monospace" font-size="11">CACHED</text>
+
+                <!-- Arrow -->
+                <path d="M 270 68 L 270 84" stroke="#475569" stroke-width="2"/>
+                <!-- Stage 2 -->
+                <rect x="16" y="84" width="508" height="58" rx="8" fill="#121f38" stroke="#a78bfa" stroke-width="1.3"/>
+                <text x="32" y="107" fill="#a78bfa" font-family="monospace" font-size="12" font-weight="700">STAGE 2 · KERNEL &amp; HOST TOOLCHAIN</text>
+                <text x="32" y="127" fill="#cbd5e1" font-family="sans-serif" font-size="12.5">Zig 0.17.0 host runtime + ocloc OpenCL C → Xe2 native SPIR-V/ZEBIN</text>
+                <text x="508" y="113" text-anchor="end" fill="#a78bfa" font-family="monospace" font-size="11">~15s BUILD</text>
+
+                <!-- Arrow -->
+                <path d="M 270 142 L 270 158" stroke="#475569" stroke-width="2"/>
+                <!-- Stage 3 -->
+                <rect x="16" y="158" width="508" height="72" rx="8" fill="rgba(16,185,129,0.1)" stroke="#34d399" stroke-width="1.4"/>
+                <text x="32" y="181" fill="#34d399" font-family="monospace" font-size="12" font-weight="700">STAGE 3 · SERVING &amp; VERIFICATION LAYER</text>
+                <text x="32" y="201" fill="#e2e8f0" font-family="sans-serif" font-size="12.5">Direct Level Zero command lists · Per-kernel GPU timestamp profiler</text>
+                <text x="32" y="219" fill="#94a3b8" font-family="sans-serif" font-size="12">Verified HuggingFace tokenizer &amp; Inkling-2 chat template parity</text>
+              </svg>
+            </div>
+            <ul class="clean" style="margin-top:8px;">
+              <li><strong>Zero driver translation tax:</strong> OpenCL C compiles directly via <code>ocloc -device bmg</code> into native Xe2 ISA with full visibility into register spills &amp; GRF count.</li>
+              <li><strong>Surgical profiling:</strong> Built-in Level Zero event timestamps report exact per-kernel GPU µs and launch counts per decode step.</li>
+            </ul>
+          </div>
+
+          <!-- Right: Day-1 Jump & New Bottleneck -->
+          <div class="col">
+            <div class="card accent-emerald">
+              <div class="card-title emerald">Immediate Day-1 Decode Leap <span class="badge emerald">2.24× vs Default Vulkan</span></div>
+              <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin-bottom:12px;">
+                <div style="background:#070d1a; border:1px solid var(--border); border-radius:8px; padding:10px; text-align:center;">
+                  <div class="num c-rose" style="font-size:21px;">31.74</div>
+                  <div style="font-size:10.5px; color:var(--text-muted); margin-top:2px;">Vulkan Default</div>
+                </div>
+                <div style="background:#070d1a; border:1px solid var(--border); border-radius:8px; padding:10px; text-align:center;">
+                  <div class="num c-amber" style="font-size:21px;">34.61</div>
+                  <div style="font-size:10.5px; color:var(--text-muted); margin-top:2px;">Vulkan No-Async</div>
+                </div>
+                <div style="background:rgba(16,185,129,0.12); border:1px solid rgba(16,185,129,0.4); border-radius:8px; padding:10px; text-align:center;">
+                  <div class="num c-emerald" style="font-size:21px;">71.0 / 73.4</div>
+                  <div style="font-size:10.5px; color:#a7f3d0; margin-top:2px;">TF XPU Cold / Warm</div>
+                </div>
+              </div>
+              <div class="spec-grid">
+                <div class="spec-item"><span class="k">GPU Busy / Step</span><span class="v c-cyan">13.174 ms</span></div>
+                <div class="spec-item"><span class="k">Launches / Step</span><span class="v">533 kernels</span></div>
+              </div>
+            </div>
+
+            <div class="card accent-rose grow">
+              <div class="card-title rose">The New Bottleneck Exposed: Cold Prefill <span class="badge rose">~170 s TTFT!</span></div>
+              <ul class="clean rose" style="margin-bottom:10px;">
+                <li><strong>512-token prefill:</strong> only <strong><code>116.2 tok/s</code></strong> (decode kernels reused row-by-row without matrix-engine tiling).</li>
+                <li><strong>14.6K Hermes Turn-1 prompt:</strong> crawled at <strong><code>~85 tok/s</code> → <code>~170 seconds</code></strong> wait before token 1!</li>
+                <li><strong>Two clear missions emerged:</strong>
+                  <br>1. Push decode past <code>80+ tok/s</code> toward the GDDR6 hardware roofline.
+                  <br>2. Unlock Xe2 <strong>XMX DPAS</strong> tensor cores to crush 14.6K prefill TTFT.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="slide-footer">
+        <span>03 · PIVOT TO TENSORFOLD XPU</span>
+        <span>Slide 4 / 17</span>
+      </div>
+    </section>
+
+    <!-- ==================== SLIDE 5: PASS 1 ==================== -->
+    <section class="slide" data-title="Pass 1: Zero-Bubble Async & Vectorization" data-sub="76.08 cold / 78.23 warm tok/s · 12.275 ms GPU busy">
+      <div class="slide-header">
+        <div>
+          <div class="slide-kicker"><span class="dot"></span>04 · Optimization Pass 1</div>
+          <h2 class="slide-title">Pass 1 — Zero-Bubble Async Decode &amp; Control-Flow Vectorization</h2>
+          <p class="slide-subtitle">Eliminating host↔GPU sync bubbles and trimming ALU/barrier overhead across all 48 layer visits</p>
+        </div>
+        <div class="header-metric">
+          <div class="val">78.23 tok/s</div>
+          <div class="lbl">Warm (76.08 Cold · 12.275 ms)</div>
+        </div>
+      </div>
+
+      <div class="slide-body">
+        <!-- Async Timeline Diagram -->
+        <div class="card" style="padding:13px 16px;">
+          <div class="card-title" style="margin-bottom:6px;">Host-GPU Overlap: Eliminating Sync Bubbles via <code>ink2_embed_dev</code> + 2-Slot Pinned Ring <span class="badge emerald">-0.899 ms GPU Busy</span></div>
+          <svg viewBox="0 0 1150 116" style="width:100%; height:106px;">
+            <!-- Before -->
+            <text x="6" y="24" fill="#fb7185" font-family="monospace" font-size="11" font-weight="700">BEFORE (Sync)</text>
+            <rect x="130" y="8" width="230" height="24" rx="4" fill="#1e3a5f" stroke="#38bdf8"/>
+            <text x="245" y="24" text-anchor="middle" fill="#e2e8f0" font-family="monospace" font-size="10.5">GPU Step N (13.17 ms)</text>
+            <rect x="364" y="8" width="66" height="24" rx="4" fill="rgba(244,63,94,0.28)" stroke="#f43f5e" stroke-dasharray="3 2"/>
+            <text x="397" y="24" text-anchor="middle" fill="#fda4af" font-family="monospace" font-size="9.5">Host Wait</text>
+            <rect x="434" y="8" width="230" height="24" rx="4" fill="#1e3a5f" stroke="#38bdf8"/>
+            <text x="549" y="24" text-anchor="middle" fill="#e2e8f0" font-family="monospace" font-size="10.5">GPU Step N+1 (13.17 ms)</text>
+            <rect x="668" y="8" width="66" height="24" rx="4" fill="rgba(244,63,94,0.28)" stroke="#f43f5e" stroke-dasharray="3 2"/>
+            <text x="701" y="24" text-anchor="middle" fill="#fda4af" font-family="monospace" font-size="9.5">Host Wait</text>
+            <rect x="738" y="8" width="230" height="24" rx="4" fill="#1e3a5f" stroke="#38bdf8"/>
+            <text x="853" y="24" text-anchor="middle" fill="#e2e8f0" font-family="monospace" font-size="10.5">GPU Step N+2</text>
+
+            <!-- After -->
+            <text x="6" y="72" fill="#34d399" font-family="monospace" font-size="11" font-weight="700">PASS 1 (2-Slot)</text>
+            <rect x="130" y="54" width="212" height="26" rx="4" fill="rgba(16,185,129,0.2)" stroke="#34d399" stroke-width="1.4"/>
+            <text x="236" y="71" text-anchor="middle" fill="#d1fae5" font-family="monospace" font-size="10.5" font-weight="700">Slot 0: GPU Step N (12.28 ms)</text>
+            <rect x="345" y="54" width="212" height="26" rx="4" fill="rgba(0,212,255,0.18)" stroke="#00d4ff" stroke-width="1.4"/>
+            <text x="451" y="71" text-anchor="middle" fill="#cffafe" font-family="monospace" font-size="10.5" font-weight="700">Slot 1: GPU Step N+1 (back-to-back)</text>
+            <rect x="560" y="54" width="212" height="26" rx="4" fill="rgba(16,185,129,0.2)" stroke="#34d399" stroke-width="1.4"/>
+            <text x="666" y="71" text-anchor="middle" fill="#d1fae5" font-family="monospace" font-size="10.5" font-weight="700">Slot 0: GPU Step N+2</text>
+            <rect x="775" y="54" width="212" height="26" rx="4" fill="rgba(0,212,255,0.18)" stroke="#00d4ff" stroke-width="1.4"/>
+            <text x="881" y="71" text-anchor="middle" fill="#cffafe" font-family="monospace" font-size="10.5" font-weight="700">Slot 1: GPU Step N+3</text>
+
+            <!-- Host ring track -->
+            <text x="6" y="102" fill="#94a3b8" font-family="monospace" font-size="10.5">HOST CPU RING</text>
+            <rect x="130" y="88" width="90" height="18" rx="3" fill="#1e293b" stroke="#64748b"/>
+            <text x="175" y="100" text-anchor="middle" fill="#cbd5e1" font-family="monospace" font-size="9">Submit N+1</text>
+            <rect x="345" y="88" width="110" height="18" rx="3" fill="#1e293b" stroke="#64748b"/>
+            <text x="400" y="100" text-anchor="middle" fill="#cbd5e1" font-family="monospace" font-size="9">Read Tok N / Sub N+2</text>
+            <rect x="560" y="88" width="110" height="18" rx="3" fill="#1e293b" stroke="#64748b"/>
+            <text x="615" y="100" text-anchor="middle" fill="#cbd5e1" font-family="monospace" font-size="9">Read Tok N+1 / Sub N+3</text>
+            <text x="1005" y="71" fill="#34d399" font-family="monospace" font-size="11.5" font-weight="700">ZERO BUBBLE</text>
+          </svg>
+        </div>
+
+        <!-- 4 engineering cards -->
+        <div class="grid-2">
+          <div class="card accent-cyan">
+            <div class="card-title">1. Device-Side Token Handoff &amp; Event Ring</div>
+            <ul class="clean">
+              <li><strong><code>ink2_embed_dev</code>:</strong> reads the sampled token ID directly from GPU device memory, avoiding CPU round-trip stalls before launching the next step.</li>
+              <li><strong>2-slot host-pinned event ring:</strong> host reads token <code>N-1</code> from pinned memory while GPU immediately executes token <code>N</code>.</li>
+            </ul>
+          </div>
+
+          <div class="card accent-emerald">
+            <div class="card-title emerald">2. 0-Barrier 1-Subgroup Top-8 Router</div>
+            <ul class="clean emerald">
+              <li><strong><code>ink2_router_k</code>:</strong> entire 128-expert softmax &amp; top-8 selection runs inside a single Xe2 SIMD16 subgroup using register shuffles.</li>
+              <li><strong>Zero SLM barriers</strong> across all 48 MoE routing invocations per token.</li>
+            </ul>
+          </div>
+
+          <div class="card accent-violet">
+            <div class="card-title violet">3. Vectorized Branchless Loop Controller</div>
+            <ul class="clean violet">
+              <li><strong><code>ink2_ctl_down_k</code>:</strong> switched to wide <code>vload4</code> coalesced loads and branchless arithmetic inside the looped L6–L17 controller path.</li>
+              <li>Eliminates divergent control flow and scalar load bottlenecks across 36 looped visits.</li>
+            </ul>
+          </div>
+
+          <div class="card accent-amber">
+            <div class="card-title amber">4. Vectorized Depth Mixing (<code>mix3</code> / <code>mix3n</code>)</div>
+            <ul class="clean amber">
+              <li>Replaced scalar residual/depth-mix loops with <code>float4</code> vectorized memory transactions matching GDDR6 64-byte cachelines.</li>
+              <li><strong>Net Result:</strong> Decode climbs <code>71.00 → 76.08</code> cold (<code>73.40 → 78.23</code> warm), GPU busy drops <code>13.174 → 12.275 ms</code> (<code>533</code> launches).</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <div class="slide-footer">
+        <span>04 · PASS 1 — ZERO-BUBBLE ASYNC &amp; VECTORIZATION</span>
+        <span>Slide 5 / 17</span>
+      </div>
+    </section>
+
+    <!-- ==================== SLIDE 6: PASS 2 XMX DPAS BRIDGE ==================== -->
+    <section class="slide" data-title="Pass 2: NVFP4 → Intel Xe2 XMX DPAS Bridge" data-sub="Bitwise E2M1→FP16 subnormal trick unlocks 2.7× prefill speedup">
+      <div class="slide-header">
+        <div>
+          <div class="slide-kicker"><span class="dot"></span>05 · Optimization Pass 2 — Hardware Matrix Bridge</div>
+          <h2 class="slide-title">Pass 2 — Bridging NVFP4 &amp; Q8_0 to Intel Xe2 XMX (DPAS)</h2>
+          <p class="slide-subtitle">Zero-branch bitwise unpack maps NVFP4 16-element sub-blocks 1:1 onto Xe2 <code>matrix_mad_k16</code> hardware</p>
+        </div>
+        <div class="header-metric">
+          <div class="val">311.7 tok/s</div>
+          <div class="lbl">512-tok Prefill (2.68× vs 116.2)</div>
+        </div>
+      </div>
+
+      <div class="slide-body">
+        <!-- Required Diagram #5 (Part 1): NVFP4 -> Xe2 XMX DPAS Architecture Diagram -->
+        <div class="card accent-cyan" style="padding:14px 16px;">
+          <div class="card-title">Architecture Diagram: NVFP4 (E2M1 + UE4M3) → Intel Xe2 XMX DPAS (<code>k = 16</code>) <span class="badge amber">1:1 Hardware Alignment</span></div>
+          <svg viewBox="0 0 1160 226" style="width:100%; height:210px;">
+            <defs>
+              <marker id="arrX" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#00d4ff"/>
+              </marker>
+              <marker id="arrG" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#34d399"/>
+              </marker>
+            </defs>
+
+            <!-- Box 1: NVFP4 Packed Memory -->
+            <rect x="8" y="18" width="246" height="190" rx="10" fill="#0b1528" stroke="#38bdf8" stroke-width="1.5"/>
+            <text x="131" y="40" text-anchor="middle" fill="#38bdf8" font-family="monospace" font-size="12" font-weight="700">1. NVFP4 SUB-BLOCK (16 elems)</text>
+            <rect x="24" y="54" width="214" height="36" rx="5" fill="#132645" stroke="#38bdf8" stroke-width="1"/>
+            <text x="131" y="70" text-anchor="middle" fill="#f1f5f9" font-family="monospace" font-size="11" font-weight="700">16 × E2M1 4-bit Nibbles</text>
+            <text x="131" y="84" text-anchor="middle" fill="#94a3b8" font-family="monospace" font-size="9.5">8 bytes packed (vals: ±0, 0.5, 1..6)</text>
+
+            <rect x="24" y="102" width="214" height="34" rx="5" fill="rgba(245,158,11,0.14)" stroke="#fbbf24" stroke-width="1"/>
+            <text x="131" y="118" text-anchor="middle" fill="#fbbf24" font-family="monospace" font-size="11" font-weight="700">1 × UE4M3 Scale Byte (sc)</text>
+            <text x="131" y="131" text-anchor="middle" fill="#fde68a" font-family="monospace" font-size="9.5">Shared across exact 16-elem k-slice</text>
+
+            <rect x="24" y="148" width="214" height="46" rx="5" fill="#07101f" stroke="#1e2e4d"/>
+            <text x="131" y="167" text-anchor="middle" fill="#34d399" font-family="monospace" font-size="10.5" font-weight="700">KEY INSIGHT: 16 elems == k=16</text>
+            <text x="131" y="183" text-anchor="middle" fill="#94a3b8" font-family="monospace" font-size="9.5">Zero inner-loop scale divergence!</text>
+
+            <line x1="254" y1="112" x2="290" y2="112" stroke="#00d4ff" stroke-width="2" marker-end="url(#arrX)"/>
+
+            <!-- Box 2: Bitwise Unpack nv_pair -->
+            <rect x="294" y="18" width="278" height="190" rx="10" fill="#0b1528" stroke="#a78bfa" stroke-width="1.5"/>
+            <text x="433" y="40" text-anchor="middle" fill="#a78bfa" font-family="monospace" font-size="12" font-weight="700">2. BITWISE UNPACK (nv_pair)</text>
+
+            <rect x="310" y="54" width="246" height="62" rx="6" fill="#060a14" stroke="#2c436e"/>
+            <text x="320" y="73" fill="#38bdf8" font-family="monospace" font-size="10.5">// E2M1 [s|e1|e0|m] → FP16 bits:</text>
+            <text x="320" y="90" fill="#fbbf24" font-family="monospace" font-size="10.5">sign=(n&amp;8)&lt;&lt;12; mag=(n&amp;7)&lt;&lt;9;</text>
+            <text x="320" y="106" fill="#34d399" font-family="monospace" font-size="10.5">fp16_raw = sign | mag; // val·2⁻¹⁴</text>
+
+            <rect x="310" y="126" width="246" height="68" rx="6" fill="rgba(139,92,246,0.12)" stroke="#a78bfa" stroke-width="1"/>
+            <text x="433" y="146" text-anchor="middle" fill="#ede9fe" font-family="monospace" font-size="10.5" font-weight="700">Native Subnormal Preservation!</text>
+            <text x="433" y="163" text-anchor="middle" fill="#cbd5e1" font-family="sans-serif" font-size="11">E2M1 0.5 (mag=1) maps to FP16 0x0200</text>
+            <text x="433" y="180" text-anchor="middle" fill="#c4b5fd" font-family="sans-serif" font-size="11">(= 0.5 · 2⁻¹⁴), handled natively by XMX</text>
+
+            <line x1="572" y1="112" x2="608" y2="112" stroke="#00d4ff" stroke-width="2" marker-end="url(#arrX)"/>
+
+            <!-- Box 3: Xe2 XMX DPAS Engine -->
+            <rect x="612" y="18" width="270" height="190" rx="10" fill="rgba(0,212,255,0.08)" stroke="#00d4ff" stroke-width="1.8"/>
+            <text x="747" y="40" text-anchor="middle" fill="#00d4ff" font-family="monospace" font-size="12" font-weight="700">3. Xe2 XMX DPAS ENGINE</text>
+            <rect x="628" y="54" width="238" height="46" rx="6" fill="#060c18" stroke="#00d4ff" stroke-width="1"/>
+            <text x="747" y="72" text-anchor="middle" fill="#f1f5f9" font-family="monospace" font-size="10.5" font-weight="700">intel_sub_group_f16_f16_</text>
+            <text x="747" y="89" text-anchor="middle" fill="#00d4ff" font-family="monospace" font-size="11" font-weight="700">matrix_mad_k16(A, B, 0.0f)</text>
+
+            <text x="747" y="122" text-anchor="middle" fill="#e2e8f0" font-family="sans-serif" font-size="11.5">• Activations A: FP16 [8 × 16] tile</text>
+            <text x="747" y="141" text-anchor="middle" fill="#e2e8f0" font-family="sans-serif" font-size="11.5">• Weights B: unpacked FP16 [16 × 16]</text>
+            <text x="747" y="160" text-anchor="middle" fill="#34d399" font-family="sans-serif" font-size="11.5" font-weight="600">• Output: FP32 tile (zero overflow)</text>
+            <text x="747" y="185" text-anchor="middle" fill="#94a3b8" font-family="monospace" font-size="10">Single systolic instruction · 2048 ops</text>
+
+            <line x1="882" y1="112" x2="918" y2="112" stroke="#34d399" stroke-width="2" marker-end="url(#arrG)"/>
+
+            <!-- Box 4: Post-Scale Accumulate -->
+            <rect x="922" y="18" width="230" height="190" rx="10" fill="rgba(16,185,129,0.09)" stroke="#34d399" stroke-width="1.6"/>
+            <text x="1037" y="40" text-anchor="middle" fill="#34d399" font-family="monospace" font-size="12" font-weight="700">4. POST-SCALE ACCUM</text>
+            <rect x="938" y="58" width="198" height="54" rx="6" fill="#060c18" stroke="#10b981"/>
+            <text x="1037" y="80" text-anchor="middle" fill="#34d399" font-family="monospace" font-size="12" font-weight="700">acc += dpas_out</text>
+            <text x="1037" y="99" text-anchor="middle" fill="#fbbf24" font-family="monospace" font-size="12" font-weight="700">     * lut16[sc];</text>
+
+            <text x="1037" y="136" text-anchor="middle" fill="#cbd5e1" font-family="sans-serif" font-size="11.5"><code>lut16[sc]</code> bakes in</text>
+            <text x="1037" y="154" text-anchor="middle" fill="#fbbf24" font-family="monospace" font-size="11.5" font-weight="700">UE4M3(sc) × 2⁺¹⁴</text>
+            <text x="1037" y="176" text-anchor="middle" fill="#94a3b8" font-family="sans-serif" font-size="11">Cancels 2⁻¹⁴ shift in 1 FMA!</text>
+            <text x="1037" y="194" text-anchor="middle" fill="#a7f3d0" font-family="monospace" font-size="10">Exact FP32 accumulation</text>
+          </svg>
+        </div>
+
+        <!-- Bottom row: 3 kernels + results -->
+        <div class="grid-2-wide-l">
+          <div class="card">
+            <div class="card-title">3 New Xe2 XMX Prefill Kernels (<code>TMAX = 64</code>)</div>
+            <ul class="clean">
+              <li><strong><code>ink2_gemm_q8_xmx</code>:</strong> Dense QKV, Output, and Conv projections — unpacks <code>int8</code> Q8_0 directly to FP16 registers for <code>k=16</code> DPAS tiles.</li>
+              <li><strong><code>ink2_gateup_nvfp4_xmx</code>:</strong> Batched MoE gate+up projections across active tokens per expert using the <code>nv_pair</code> + <code>lut16[sc]</code> pipeline.</li>
+              <li><strong><code>ink2_down_nvfp4_xmx</code>:</strong> Batched MoE down-projection writing weighted expert outputs back to residual stream.</li>
+            </ul>
+          </div>
+
+          <div class="card accent-emerald">
+            <div class="card-title emerald">Pass 2 Verified Gains <span class="badge emerald">2.68× Prefill</span></div>
+            <div class="spec-grid" style="margin-bottom:10px;">
+              <div class="spec-item"><span class="k">512-tok Prefill</span><span class="v c-emerald">116.2 → 311.7 tok/s</span></div>
+              <div class="spec-item"><span class="k">4K-tok Prefill</span><span class="v c-cyan">212.1 tok/s</span></div>
+              <div class="spec-item"><span class="k">Decode Speed</span><span class="v c-emerald">78.48 tok/s</span></div>
+              <div class="spec-item"><span class="k">Tile Batch Cap</span><span class="v">TMAX = 64</span></div>
+            </div>
+            <div style="font-size:12px; color:var(--text-secondary); line-height:1.4;">
+              <strong style="color:var(--amber-bright)">Next clue from IGC compiler stats:</strong> 4-accumulator <code>gateup_*_xmx</code> kernels were spilling <strong>2.1–5.8 KB</strong> of registers to scratch memory under 128-GRF mode!
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="slide-footer">
+        <span>05 · PASS 2 — BRIDGING NVFP4 &amp; Q8_0 TO Xe2 XMX DPAS</span>
+        <span>Slide 6 / 17</span>
+      </div>
+    </section>
+
+    <!-- ==================== SLIDE 7: PASS 3B ==================== -->
+    <section class="slide" data-title="Pass 3B: Dual-GRF Dispatch & Online FlashAttention" data-sub="796.4 tok/s (256) · 742.5 tok/s (512, 6.4×) · 42.9s 14.6K Hermes">
+      <div class="slide-header">
+        <div>
+          <div class="slide-kicker"><span class="dot"></span>06 · Optimization Pass 3B — Prefill Breakthrough</div>
+          <h2 class="slide-title">Pass 3B — Mixed 128/256-GRF Dispatch, TMAX=256 &amp; Online FlashAttention</h2>
+          <p class="slide-subtitle">Eliminating register spills without hurting decode occupancy, plus zero-scratch attention and 53× faster routing</p>
+        </div>
+        <div class="header-metric">
+          <div class="val">742.5 tok/s</div>
+          <div class="lbl">512-tok (6.39×) · 796.4 @ 256</div>
+        </div>
+      </div>
+
+      <div class="slide-body">
+        <div class="grid-2-wide-l">
+          <!-- Left: Dual-GRF Architecture Diagram (Required Diagram #5 Part 2) -->
+          <div class="card accent-amber">
+            <div class="card-title amber">Mixed 128 / 256-GRF Dual-Module Dispatch <span class="badge emerald">2.33× GateUp Speedup</span></div>
+            <svg viewBox="0 0 620 232" style="width:100%; height:220px;">
+              <!-- Host Dispatcher -->
+              <rect x="195" y="6" width="230" height="38" rx="7" fill="#13223d" stroke="#38bdf8" stroke-width="1.4"/>
+              <text x="310" y="23" text-anchor="middle" fill="#f1f5f9" font-family="monospace" font-size="11.5" font-weight="700">TensorFold Level Zero Host</text>
+              <text x="310" y="37" text-anchor="middle" fill="#94a3b8" font-family="monospace" font-size="9.5">Per-Kernel GRF Module Selector</text>
+
+              <!-- Branches -->
+              <path d="M 245 44 L 150 74" stroke="#38bdf8" stroke-width="1.8"/>
+              <path d="M 375 44 L 470 74" stroke="#fbbf24" stroke-width="1.8"/>
+
+              <!-- Left Module: 128-GRF -->
+              <rect x="10" y="74" width="286" height="148" rx="9" fill="#0b1528" stroke="#38bdf8" stroke-width="1.5"/>
+              <text x="153" y="96" text-anchor="middle" fill="#38bdf8" font-family="monospace" font-size="12" font-weight="700">kbin.ink2 (mod128 · Default)</text>
+              <rect x="26" y="108" width="254" height="28" rx="5" fill="rgba(0,212,255,0.12)"/>
+              <text x="153" y="126" text-anchor="middle" fill="#bae6fd" font-family="monospace" font-size="10.5">2× Hardware Thread Occupancy</text>
+              <text x="26" y="156" fill="#cbd5e1" font-family="sans-serif" font-size="11.5">• All decode GEMV &amp; MoE kernels</text>
+              <text x="26" y="175" fill="#cbd5e1" font-family="sans-serif" font-size="11.5">• Attention, norm, mix3, router</text>
+              <text x="26" y="194" fill="#34d399" font-family="monospace" font-size="10.5" font-weight="700">✓ Keeps decode latency hiding intact</text>
+              <text x="26" y="211" fill="#fb7185" font-family="monospace" font-size="10">(Global 256-GRF regressed to 65.65 tok/s!)</text>
+
+              <!-- Right Module: 256-GRF -->
+              <rect x="324" y="74" width="286" height="148" rx="9" fill="rgba(245,158,11,0.08)" stroke="#fbbf24" stroke-width="1.6"/>
+              <text x="467" y="96" text-anchor="middle" fill="#fbbf24" font-family="monospace" font-size="12" font-weight="700">kbin.ink2_256 (mod256 · Large GRF)</text>
+              <rect x="340" y="108" width="254" height="28" rx="5" fill="rgba(16,185,129,0.18)"/>
+              <text x="467" y="126" text-anchor="middle" fill="#34d399" font-family="monospace" font-size="11" font-weight="700">0 Bytes Spill (was 2.1–5.8 KB!)</text>
+              <text x="340" y="156" fill="#e2e8f0" font-family="sans-serif" font-size="11.5">• 4-accumulator <code>gateup_*_xmx</code> only</text>
+              <text x="340" y="176" fill="#fbbf24" font-family="monospace" font-size="12" font-weight="700">256 ms → 110 ms (2.33× faster!)</text>
+              <text x="340" y="196" fill="#cbd5e1" font-family="sans-serif" font-size="11">• Fits 4× FP32 DPAS tiles in GRF cleanly</text>
+              <text x="340" y="212" fill="#94a3b8" font-family="monospace" font-size="10">-ze-opt-large-register-file</text>
+            </svg>
+            <div style="font-size:12.2px; color:var(--text-secondary); margin-top:4px;">
+              Best of both worlds: <strong>0 register spills</strong> on register-heavy XMX prefill, <strong>2× occupancy</strong> on bandwidth-bound decode.
+            </div>
+          </div>
+
+          <!-- Right: FlashAttention, Route Lists, Results -->
+          <div class="col">
+            <div class="card accent-cyan">
+              <div class="card-title">Zero-Scratch Online FlashAttention &amp; Fast Routing</div>
+              <ul class="clean">
+                <li><strong>GQA-3 Online-Softmax <code>ink2_attn_b</code>:</strong> streams K/V blocks in registers without materializing the attention score matrix — <strong>saves 1.6 GB VRAM at 64K context</strong>.</li>
+                <li><strong>128-thread parallel <code>ink2_route_lists</code>:</strong> parallelized token-to-expert bucketing drops routing prep from <strong><code>12.2 ms → 0.23 ms</code> (53× faster)</strong>.</li>
+                <li><strong><code>TMAX = 256</code> chunking:</strong> 4× larger XMX prefill tiles dramatically improve expert batch density.</li>
+              </ul>
+            </div>
+
+            <div class="card accent-emerald grow">
+              <div class="card-title emerald">Pass 3B Verified Results <span class="badge emerald">24/24 Bit-Identical</span></div>
+              <div class="spec-grid" style="margin-bottom:10px;">
+                <div class="spec-item"><span class="k">256-tok Prefill</span><span class="v c-emerald">796.4 tok/s</span></div>
+                <div class="spec-item"><span class="k">512-tok Prefill</span><span class="v c-emerald">742.5 tok/s (6.4×)</span></div>
+                <div class="spec-item"><span class="k">4K-tok Prefill</span><span class="v c-cyan">504.1 tok/s</span></div>
+                <div class="spec-item"><span class="k">14.6K Hermes TTFT</span><span class="v c-amber">42.9 s (340.1 tok/s)</span></div>
+                <div class="spec-item"><span class="k">Decode Speed</span><span class="v c-cyan">79.67 tok/s</span></div>
+                <div class="spec-item"><span class="k">Accuracy Gate</span><span class="v c-emerald">rel L2 = 5.41e-4</span></div>
+              </div>
+              <div class="callout emerald" style="margin-top:auto; padding:8px 12px; font-size:12px;">
+                <strong>4.0× faster Hermes Turn-1:</strong> 14.6K prompt ingestion slashed from <strong>~170 s → 42.9 s</strong> with 24/24 exact greedy token match.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="slide-footer">
+        <span>06 · PASS 3B — DUAL-GRF DISPATCH, TMAX=256 &amp; ONLINE FLASHATTENTION</span>
+        <span>Slide 7 / 17</span>
+      </div>
+    </section>
+
+    <!-- ==================== SLIDE 8: PASS 4 DP4A ==================== -->
+    <section class="slide" data-title="Pass 4: Xe2 Hardware DP4A + BF16 Controllers" data-sub="80.05 tok/s decode · LM head hits 578.3 GB/s (95.1% peak!)">
+      <div class="slide-header">
+        <div>
+          <div class="slide-kicker"><span class="dot"></span>07 · Optimization Pass 4 — Breaking 80 tok/s</div>
+          <h2 class="slide-title">Pass 4 — Intel Xe2 Hardware DP4A (<code>dot_acc_sat</code>) + BF16 Loop Controllers</h2>
+          <p class="slide-subtitle">Quantizing decode activations to Q8_1 unlocks 4-way INT8 dot-product throughput — pushing LM head to 95.1% of DRAM peak</p>
+        </div>
+        <div class="header-metric">
+          <div class="val">578.3 GB/s</div>
+          <div class="lbl">LM Head = 95.1% Hardware Peak</div>
+        </div>
+      </div>
+
+      <div class="slide-body">
+        <div class="grid-2">
+          <!-- Left: DP4A Mechanics -->
+          <div class="col">
+            <div class="card accent-violet grow">
+              <div class="card-title violet">Xe2 Hardware <code>dot_acc_sat</code> (DP4A) Pipeline <span class="badge violet">4× INT8 / Op</span></div>
+              <ul class="clean violet" style="margin-bottom:12px;">
+                <li><strong>Why Q8_0 decode was ALU-bound:</strong> unpacking <code>int8</code> weights to FP32 and doing scalar FMAs limited memory-request issue rate on dense GEMVs.</li>
+                <li><strong>Q8_1 Activation Quantization:</strong> quantize each 32-element activation block to <code>int8</code> + block scale <code>d_x</code>, then run native hardware <code>dot_acc_sat(char4_w, char4_x, acc_i32)</code> — 4 multiply-adds per instruction, scaling once per 32-element block in FP32.</li>
+                <li><strong>4 DP4A Decode Kernels:</strong>
+                  <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:6px;">
+                    <code>gemv_bigx4_dp4a</code>
+                    <code>gemv_conv2s_dp4a</code>
+                    <code>gemv_q8_4_dp4a</code>
+                    <code>down_q8_dp4a</code>
+                  </div>
+                </li>
+              </ul>
+
+              <div class="code-block" style="margin-top:auto;"><span class="cm">// Xe2 native INT8 DP4A inner loop (32 elements = 8 ops):</span>
+<span class="kw">int</span> isum = <span class="num">0</span>;
+<span class="kw">for</span> (<span class="kw">int</span> j = <span class="num">0</span>; j &lt; <span class="num">8</span>; ++j)
+  isum = <span class="fn">intel_sub_group_dp4a</span> / <span class="fn">dot_acc_sat</span>(w4[j], x4[j], isum);
+acc += (<span class="kw">float</span>)isum * (w_scale * x_scale);</div>
+            </div>
+          </div>
+
+          <!-- Right: BF16, LM Head Peak, Results & Tradeoff -->
+          <div class="col">
+            <div class="card accent-emerald">
+              <div class="card-title emerald">Hero Kernel: LM Head Hits Hardware Roofline <span class="badge emerald">95.1% Peak</span></div>
+              <div style="display:flex; align-items:center; justify-content:space-between; gap:14px; margin-bottom:10px;">
+                <div>
+                  <div style="font-family:var(--font-mono); font-size:28px; font-weight:800; color:var(--emerald-bright);">578.3 GB/s</div>
+                  <div style="font-size:12px; color:var(--text-secondary);"><code>gemv_q8_4_dp4a</code>: <strong>492 MB</strong> read in <strong>0.851 ms</strong></div>
+                </div>
+                <div style="text-align:right;">
+                  <div style="font-family:var(--font-mono); font-size:14px; color:var(--cyan); font-weight:700;">Peak ~608 GB/s</div>
+                  <div style="font-size:11.5px; color:var(--text-muted);">256-bit GDDR6 limit</div>
+                </div>
+              </div>
+              <div style="height:10px; background:#070c18; border-radius:99px; overflow:hidden; border:1px solid var(--border);">
+                <div style="width:95.1%; height:100%; background:linear-gradient(90deg, #00d4ff, #34d399);"></div>
+              </div>
+            </div>
+
+            <div class="card accent-cyan">
+              <div class="card-title">BF16 Loop Controllers &amp; Long-Context Verification</div>
+              <ul class="clean">
+                <li><strong>BF16 Loop Controller Weights:</strong> halved DRAM traffic (<code>2×</code> smaller) for loop controller projections across all 36 looped layer visits.</li>
+                <li><strong>Short Decode:</strong> broke the barrier at <strong><code>80.05 tok/s</code></strong> (<code>11.961 ms</code> GPU busy).</li>
+                <li><strong>14.6K Context Decode (<code>CTX=65536</code>):</strong> sustained <strong><code>65.50 tok/s</code></strong> with <strong>64/64 exact greedy match</strong>!</li>
+              </ul>
+            </div>
+
+            <div class="card accent-amber grow">
+              <div class="card-title amber">Profiler Discovery Leading Directly to Pass 5 <span class="badge amber">+105 Launches</span></div>
+              <div style="font-size:12.8px; color:#e2e8f0; line-height:1.45;">
+                Standalone <code>quant_q8</code> kernels added <strong>105 tiny dispatches/step</strong> (<code>533 → 638</code> launches/step), creating host submission + barrier overhead that masked part of DP4A's raw speed. <strong>Next: fuse quantization directly into producer kernels!</strong>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="slide-footer">
+        <span>07 · PASS 4 — Xe2 HARDWARE DP4A &amp; BF16 LOOP CONTROLLERS</span>
+        <span>Slide 8 / 17</span>
+      </div>
+    </section>
+
+    <!-- ==================== SLIDE 9: PASS 5 FUSED QUANT ==================== -->
+    <section class="slide" data-title="Pass 5: Fused Warp-Shuffle Quant & Launch Elimination" data-sub="81.79 tok/s decode · 11.795 ms GPU busy · 638 → 537 launches">
+      <div class="slide-header">
+        <div>
+          <div class="slide-kicker"><span class="dot"></span>08 · Optimization Pass 5 — Peak Decode</div>
+          <h2 class="slide-title">Pass 5 — Fused Warp-Shuffle Q8_1 Quantization &amp; Launch Elimination</h2>
+          <p class="slide-subtitle">Fusing 0-barrier <code>quant4_32</code> into producer epilogues eliminates 101 kernel launches/step and reaches 96.5% of GPU ceiling</p>
+        </div>
+        <div class="header-metric">
+          <div class="val">81.79 tok/s</div>
+          <div class="lbl">11.795 ms GPU (84.78 Ceiling)</div>
+        </div>
+      </div>
+
+      <div class="slide-body">
+        <!-- Fusion Diagram -->
+        <div class="card accent-emerald" style="padding:13px 16px;">
+          <div class="card-title emerald" style="margin-bottom:8px;">Kernel Fusion: Eliminating 101 <code>quant_q8</code> Dispatches per Token <span class="badge emerald">638 → 537 Launches (-15.8%)</span></div>
+          <svg viewBox="0 0 1150 132" style="width:100%; height:124px;">
+            <defs>
+              <marker id="arrP5" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#34d399"/>
+              </marker>
+            </defs>
+            <!-- Pass 4 Unfused -->
+            <text x="10" y="28" fill="#fb7185" font-family="monospace" font-size="11" font-weight="700">PASS 4 (Unfused)</text>
+            <rect x="152" y="10" width="208" height="32" rx="6" fill="#13223d" stroke="#64748b"/>
+            <text x="256" y="30" text-anchor="middle" fill="#e2e8f0" font-family="monospace" font-size="11">norm / mix3n / attn2</text>
+            <text x="394" y="23" text-anchor="middle" fill="#94a3b8" font-family="monospace" font-size="9">FP32 DRAM</text>
+            <line x1="360" y1="26" x2="430" y2="26" stroke="#fb7185" stroke-width="1.6"/>
+            <rect x="434" y="10" width="184" height="32" rx="6" fill="rgba(244,63,94,0.18)" stroke="#f43f5e"/>
+            <text x="526" y="30" text-anchor="middle" fill="#fda4af" font-family="monospace" font-size="11" font-weight="700">quant_q8 (×105!)</text>
+            <text x="652" y="23" text-anchor="middle" fill="#94a3b8" font-family="monospace" font-size="9">Q8_1 DRAM</text>
+            <line x1="618" y1="26" x2="688" y2="26" stroke="#fb7185" stroke-width="1.6"/>
+            <rect x="692" y="10" width="218" height="32" rx="6" fill="#13223d" stroke="#a78bfa"/>
+            <text x="801" y="30" text-anchor="middle" fill="#ddd6fe" font-family="monospace" font-size="11">gemv_*_dp4a consumer</text>
+            <text x="1032" y="30" text-anchor="middle" fill="#fb7185" font-family="monospace" font-size="11.5" font-weight="700">638 launches / 11.961 ms</text>
+
+            <!-- Pass 5 Fused -->
+            <text x="10" y="92" fill="#34d399" font-family="monospace" font-size="11" font-weight="700">PASS 5 (Fused)</text>
+            <rect x="152" y="66" width="466" height="48" rx="8" fill="rgba(16,185,129,0.14)" stroke="#34d399" stroke-width="1.8"/>
+            <text x="385" y="86" text-anchor="middle" fill="#f1f5f9" font-family="monospace" font-size="11.5" font-weight="700">Producer (norm / mix3n / attn2 / attn_merge) + inline quant4_32()</text>
+            <text x="385" y="104" text-anchor="middle" fill="#a7f3d0" font-family="monospace" font-size="10">intel_sub_group_shuffle_xor max-abs reduction · 0 barriers · writes Q8_1 directly</text>
+
+            <line x1="618" y1="90" x2="688" y2="90" stroke="#34d399" stroke-width="2" marker-end="url(#arrP5)"/>
+            <text x="653" y="82" text-anchor="middle" fill="#34d399" font-family="monospace" font-size="9.5">Q8_1</text>
+
+            <rect x="692" y="72" width="218" height="36" rx="6" fill="rgba(0,212,255,0.12)" stroke="#00d4ff" stroke-width="1.4"/>
+            <text x="801" y="94" text-anchor="middle" fill="#cffafe" font-family="monospace" font-size="11" font-weight="700">gemv_*_dp4a consumer</text>
+
+            <text x="1032" y="86" text-anchor="middle" fill="#34d399" font-family="monospace" font-size="12" font-weight="700">537 launches (-101)</text>
+            <text x="1032" y="104" text-anchor="middle" fill="#38bdf8" font-family="monospace" font-size="11">11.795 ms · 81.79 tok/s</text>
+          </svg>
+        </div>
+
+        <div class="grid-3" style="flex:1;">
+          <div class="card accent-cyan">
+            <div class="card-title">0-Barrier <code>quant4_32</code> Helper</div>
+            <ul class="clean">
+              <li>Each thread holds 4 FP32 values (8 threads = 32-element Q8_1 block).</li>
+              <li><code>intel_sub_group_shuffle_xor</code> with masks <code>1, 2, 4</code> computes exact block max-abs in 3 register ops — <strong>0 SLM, 0 barriers</strong>.</li>
+              <li>Fused into <code>norm</code>, <code>mix3n</code>, <code>attn2</code>, and <code>attn_merge</code>: standalone <code>quant_q8</code> falls from <strong>105 → 4</strong>.</li>
+            </ul>
+          </div>
+
+          <div class="card accent-amber">
+            <div class="card-title amber">Surgical Profiler-Guided Tuning</div>
+            <ul class="clean amber">
+              <li><strong>Reverted <code>gateup_q8</code> to FP32:</strong> profiler proved FP32 beat DP4A on small-row <code>gateup_q8</code> (<strong><code>0.451 ms</code> vs <code>0.494 ms</code></strong>).</li>
+              <li><strong>Tuned <code>gemv_bigx4_dp4a</code>:</strong> switched workgroup width to <code>KERNEL(64)</code> for superior Xe2 occupancy &amp; L2 locality.</li>
+              <li>Data beats dogma: keep DP4A only where hardware timestamps confirm a net win.</li>
+            </ul>
+          </div>
+
+          <div class="card accent-emerald">
+            <div class="card-title emerald">Verified Peak Decode Metrics</div>
+            <div class="spec-grid" style="grid-template-columns:1fr; gap:7px;">
+              <div class="spec-item"><span class="k">Wall-Clock Decode</span><span class="v c-emerald">81.79 tok/s</span></div>
+              <div class="spec-item"><span class="k">GPU Busy / Step</span><span class="v c-cyan">11.795 ms</span></div>
+              <div class="spec-item"><span class="k">GPU-Only Ceiling</span><span class="v c-amber">84.78 tok/s</span></div>
+              <div class="spec-item"><span class="k">Host Overhead</span><span class="v">0.43 ms (3.5%)</span></div>
+              <div class="spec-item"><span class="k">Exact Greedy Match</span><span class="v c-emerald">64 / 64 tokens</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="slide-footer">
+        <span>08 · PASS 5 — FUSED WARP-SHUFFLE QUANTIZATION &amp; LAUNCH ELIMINATION</span>
+        <span>Slide 9 / 17</span>
+      </div>
+    </section>
+
+    <!-- ==================== SLIDE 10: PERFORMANCE EVOLUTION CHARTS ==================== -->
+    <section class="slide" data-title="Performance Evolution Charts" data-sub="Decode (31.74 → 84.87 tok/s) & Flat ~900 tok/s Prefill to 14.6K">
+      <div class="slide-header">
+        <div>
+          <div class="slide-kicker"><span class="dot"></span>09 · Quantitative Trajectory</div>
+          <h2 class="slide-title">End-to-End Performance Evolution</h2>
+          <p class="slide-subtitle">Verified decode throughput (+167% vs Vulkan) and flat ~900 tok/s prefill up to 14.6K (10.2× faster Turn-1; 269× faster cached Turn-2+)</p>
+        </div>
+        <div class="header-metric">
+          <div class="val">2.67× / 10.2×</div>
+          <div class="lbl">Decode / 14.6K Prefill Gains</div>
+        </div>
+      </div>
+
+      <div class="slide-body">
+        <div class="grid-2">
+          <!-- Chart 1: Decode Evolution -->
+          <div class="card">
+            <div class="card-title">
+              <span>Decode Throughput Evolution (tok/s)</span>
+              <span class="badge cyan">Hover bars for details</span>
+            </div>
+            <div class="chart-wrap" id="chart-decode"></div>
+            <div style="display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:10.5px; color:var(--text-secondary); padding-top:6px; border-top:1px solid var(--border);">
+              <span>Dashed line: <strong class="c-amber">85.8 tok/s</strong> GPU ceiling · <strong class="c-emerald">84.94</strong> p8</span>
+              <span>Ctx: <strong class="c-cyan">67.1</strong> @14.6K · <strong class="c-emerald">41.2</strong> @64K · <strong class="c-amber">27.6</strong> @128K</span>
+            </div>
+          </div>
+
+          <!-- Chart 2: Prefill & Hermes 14.6K Evolution -->
+          <div class="card">
+            <div class="card-title">
+              <span>Prefill Throughput &amp; 14.6K Hermes Turn-1 TTFT</span>
+              <span class="badge emerald" id="pass6-chart-badge">Pass 6 Verified</span>
+            </div>
+            <div class="chart-wrap" id="chart-prefill"></div>
+            <div style="display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:10.5px; color:var(--text-secondary); padding-top:6px; border-top:1px solid var(--border);" id="prefill-chart-footnote">
+              <span>14.6K TTFT: ~170 s → 42.9 s → <strong class="c-emerald">16.70 s (874.3 tok/s)</strong></span>
+              <span>Pass 7 20.3K cache: <strong class="c-amber">89.7 ms (269×)</strong></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="slide-footer">
+        <span>09 · PERFORMANCE EVOLUTION CHARTS (PASS 6 &amp; PASS 7 VERIFIED)</span>
+        <span>Slide 10 / 17</span>
+      </div>
+    </section>
+
+    <!-- ==================== SLIDE 11: PER-KERNEL GPU BUSY BREAKDOWN ==================== -->
+    <section class="slide" data-title="Per-Kernel GPU Busy Breakdown" data-sub="13.174 ms → 11.656 ms across Passes · Exact Pass 6 profile">
+      <div class="slide-header">
+        <div>
+          <div class="slide-kicker"><span class="dot"></span>10 · Profiler Deep-Dive</div>
+          <h2 class="slide-title">Per-Kernel GPU Busy Breakdown &amp; Launch Evolution</h2>
+          <p class="slide-subtitle">Hardware timestamp trace across all passes — every microsecond of the 11.656 ms Pass 6 step accounted for</p>
+        </div>
+        <div class="header-metric">
+          <div class="val">11.656 ms</div>
+          <div class="lbl">537 Launches · 85.8 GPU tok/s</div>
+        </div>
+      </div>
+
+      <div class="slide-body">
+        <div class="grid-2-wide-r">
+          <!-- Left: Pass Evolution Stacked Comparison -->
+          <div class="col">
+            <div class="card">
+              <div class="card-title">GPU Busy &amp; Launch Count Across Passes</div>
+              <div class="chart-wrap" id="chart-pass-busy" style="min-height:215px;"></div>
+            </div>
+
+            <div class="card grow">
+              <div class="card-title">Pass 6 Wave-Alignment &amp; Hoist Savings (-139 µs)</div>
+              <ul class="clean" style="gap:7px;">
+                <li><strong class="c-cyan"><code>gemv_bigx4_dp4a</code> (2.711 ms · 23.3%):</strong> QKV &amp; O dense projections — A/B verified over <code>bigx2</code> (<code>2.902 ms</code>).</li>
+                <li><strong class="c-emerald"><code>gateup_nvfp4c</code> (2.341 ms · 20.1%):</strong> MoE gate+up (<code>-12 µs</code> via hoisted <code>vload16</code> <code>nv_dot32_v</code>, 9.0 exact waves).</li>
+                <li><strong class="c-amber"><code>down_nvfp4d</code> (1.234 ms · 10.6%):</strong> slashed <strong><code>-96 µs</code></strong> (<code>1.330 → 1.234 ms</code>) via <code>KERNEL(64)</code> 9.0 exact waves + <code>vload16</code>!</li>
+                <li><strong class="c-violet"><code>down_q8_dp4a</code> &amp; <code>conv2s</code>:</strong> <code>down_q8_dp4a</code> <strong><code>-25 µs</code></strong> (<code>0.224 → 0.199 ms</code>); <code>conv2s</code> <code>-5 µs</code> (<code>0.862 → 0.857 ms</code>) at 9.0 waves.</li>
+              </ul>
+            </div>
+          </div>
+
+          <!-- Right: Exact Pass 6 15-Kernel Horizontal Chart -->
+          <div class="card accent-cyan">
+            <div class="card-title">Pass 6 Exact Per-Kernel GPU Busy (11.656 ms Total) <span class="badge emerald">15 Buckets · 0 Spills</span></div>
+            <div class="chart-wrap" id="chart-kernels-p5"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="slide-footer">
+        <span>10 · PER-KERNEL GPU BUSY BREAKDOWN (PASS 6 VERIFIED)</span>
+        <span>Slide 11 / 17</span>
+      </div>
+    </section>
+
+    <!-- ==================== SLIDE 12: MEMORY BANDWIDTH ROOFLINE & WAVE QUANTIZATION ==================== -->
+    <section class="slide" data-title="Memory Bandwidth Roofline & Wave Quantization" data-sub="Achieved BW vs 608 GB/s B70 peak + Pass 6 9.0-wave fix verified">
+      <div class="slide-header">
+        <div>
+          <div class="slide-kicker"><span class="dot"></span>11 · Hardware Roofline Analysis</div>
+          <h2 class="slide-title">GDDR6 Bandwidth Roofline &amp; Xe2 Wave Quantization Solved</h2>
+          <p class="slide-subtitle">Climbing from 10–29% Vulkan utilization up to 95.1% of B70's 608 GB/s peak — and closing the wave tail in Pass 6</p>
+        </div>
+        <div class="header-metric">
+          <div class="val">95.1% Peak</div>
+          <div class="lbl">578.3 / 608 GB/s Achieved</div>
+        </div>
+      </div>
+
+      <div class="slide-body">
+        <div class="grid-2-wide-l">
+          <!-- Left: Bandwidth Roofline Chart (Required Chart #4) -->
+          <div class="card">
+            <div class="card-title">Achieved Kernel Bandwidth vs B70 256-bit GDDR6 Ceiling (~608 GB/s)</div>
+            <div class="chart-wrap" id="chart-roofline"></div>
+          </div>
+
+          <!-- Right: Wave Quantization Discovery & Pass 6 Resolution Diagram -->
+          <div class="col">
+            <div class="card accent-emerald grow">
+              <div class="card-title emerald">Xe2 Wave Quantization → Solved in Pass 6 <span class="badge emerald">288 WGs = 9.0 Waves</span></div>
+              <p style="font-size:12.3px; color:var(--text-secondary); line-height:1.42; margin-bottom:10px;">
+                Pass 5 profiling exposed fractional tail waves across B70's <strong>32 Xe-cores</strong>. Pass 6 resized <code>down_nvfp4d</code>, <code>gemv_conv2s_dp4a</code>, and <code>down_q8_dp4a</code> to <code>KERNEL(64)</code> (<code>288</code> WGs = <strong>9.0 exact waves</strong>):
+              </p>
+
+              <!-- 32 Xe-Core Wave Diagram SVG -->
+              <svg viewBox="0 0 430 228" style="width:100%; height:215px;">
+                <!-- Case 1: BEFORE down_nvfp4d 72 / 32 = 2.25 waves -->
+                <text x="4" y="16" fill="#fb7185" font-family="monospace" font-size="10.8" font-weight="700">PASS 5 · down_nvfp4d: 72 / 32 = 2.25 waves (1.330 ms)</text>
+                <rect x="4" y="24" width="128" height="22" rx="3" fill="#f59e0b"/>
+                <text x="68" y="39" text-anchor="middle" fill="#090e1a" font-family="monospace" font-size="9.5" font-weight="700">Wave 1 (32)</text>
+                <rect x="136" y="24" width="128" height="22" rx="3" fill="#f59e0b"/>
+                <text x="200" y="39" text-anchor="middle" fill="#090e1a" font-family="monospace" font-size="9.5" font-weight="700">Wave 2 (32)</text>
+                <rect x="268" y="24" width="32" height="22" rx="3" fill="#fbbf24"/>
+                <text x="284" y="39" text-anchor="middle" fill="#090e1a" font-family="monospace" font-size="9" font-weight="700">8</text>
+                <rect x="302" y="24" width="94" height="22" rx="3" fill="rgba(244,63,94,0.18)" stroke="#f43f5e" stroke-dasharray="3 2"/>
+                <text x="349" y="39" text-anchor="middle" fill="#fda4af" font-family="monospace" font-size="9">24 idle cores!</text>
+                <text x="4" y="60" fill="#94a3b8" font-family="monospace" font-size="9.5">Tail waste capped down_nvfp4d at 395 GB/s (75% wave fill)</text>
+
+                <!-- Case 2: BEFORE gemv_conv2s_dp4a 144 / 32 = 4.5 waves -->
+                <text x="4" y="92" fill="#38bdf8" font-family="monospace" font-size="10.8" font-weight="700">PASS 5 · conv2s_dp4a: 144 / 32 = 4.5 waves (0.862 ms)</text>
+                <rect x="4" y="100" width="74" height="22" rx="3" fill="#0284c7"/>
+                <rect x="81" y="100" width="74" height="22" rx="3" fill="#0284c7"/>
+                <rect x="158" y="100" width="74" height="22" rx="3" fill="#0284c7"/>
+                <rect x="235" y="100" width="74" height="22" rx="3" fill="#0284c7"/>
+                <text x="156" y="115" text-anchor="middle" fill="#f1f5f9" font-family="monospace" font-size="9.5" font-weight="700">4 Full Waves (128 WGs)</text>
+                <rect x="312" y="100" width="37" height="22" rx="3" fill="#38bdf8"/>
+                <text x="330" y="115" text-anchor="middle" fill="#090e1a" font-family="monospace" font-size="9" font-weight="700">16</text>
+                <rect x="351" y="100" width="45" height="22" rx="3" fill="rgba(244,63,94,0.18)" stroke="#f43f5e" stroke-dasharray="3 2"/>
+                <text x="373" y="115" text-anchor="middle" fill="#fda4af" font-family="monospace" font-size="8.5">16 idle</text>
+                <text x="4" y="136" fill="#94a3b8" font-family="monospace" font-size="9.5">Half-wave tail capped conv2s_dp4a at 419 GB/s (90% fill)</text>
+
+                <!-- Case 3: PASS 6 ALL ALIGNED TO 9.0 EXACT WAVES -->
+                <text x="4" y="168" fill="#34d399" font-family="monospace" font-size="10.8" font-weight="700">PASS 6 · KERNEL(64): 288 WGs / 32 = 9.0 EXACT WAVES!</text>
+                <rect x="4" y="176" width="392" height="24" rx="4" fill="rgba(16,185,129,0.24)" stroke="#34d399" stroke-width="1.4"/>
+                <line x1="48" y1="176" x2="48" y2="200" stroke="#10b981" stroke-opacity="0.5"/>
+                <line x1="91" y1="176" x2="91" y2="200" stroke="#10b981" stroke-opacity="0.5"/>
+                <line x1="135" y1="176" x2="135" y2="200" stroke="#10b981" stroke-opacity="0.5"/>
+                <line x1="178" y1="176" x2="178" y2="200" stroke="#10b981" stroke-opacity="0.5"/>
+                <line x1="222" y1="176" x2="222" y2="200" stroke="#10b981" stroke-opacity="0.5"/>
+                <line x1="265" y1="176" x2="265" y2="200" stroke="#10b981" stroke-opacity="0.5"/>
+                <line x1="309" y1="176" x2="309" y2="200" stroke="#10b981" stroke-opacity="0.5"/>
+                <line x1="352" y1="176" x2="352" y2="200" stroke="#10b981" stroke-opacity="0.5"/>
+                <text x="200" y="192" text-anchor="middle" fill="#d1fae5" font-family="monospace" font-size="10.3" font-weight="700">down_nvfp4d (-96µs) · down_q8 (-25µs) · conv2s (-5µs)</text>
+                <text x="4" y="216" fill="#34d399" font-family="monospace" font-size="9.5">✓ Verified: down_nvfp4d ~426 GB/s · Decode climbs 81.79 → 84.87 tok/s!</text>
+              </svg>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="slide-footer">
+        <span>11 · HARDWARE BANDWIDTH ROOFLINE &amp; WAVE QUANTIZATION</span>
+        <span>Slide 12 / 17</span>
+      </div>
+    </section>
+
+    <!-- ==================== SLIDE 13: DEAD ENDS & ENGINEERING DISCIPLINE ==================== -->
+    <section class="slide" data-title="Dead Ends & Engineering Discipline" data-sub="6 reverted / A/B-rejected experiments — why profiler gating matters">
+      <div class="slide-header">
+        <div>
+          <div class="slide-kicker"><span class="dot"></span>12 · Lessons Learned</div>
+          <h2 class="slide-title">Dead Ends &amp; Engineering Discipline (What Didn't Work)</h2>
+          <p class="slide-subtitle">Every rejected hypothesis and A/B test taught a concrete Xe2 architectural lesson — zero unverified changes shipped</p>
+        </div>
+        <div class="header-metric" style="border-color:rgba(16,185,129,0.45);">
+          <div class="val c-emerald">64 / 64</div>
+          <div class="lbl">Greedy Parity Gate Every Pass</div>
+        </div>
+      </div>
+
+      <div class="slide-body">
+        <div class="card">
+          <div class="card-title rose">Reverted &amp; A/B-Rejected Experiments — Measured &amp; Diagnosed <span class="badge rose">All Profiler-Gated</span></div>
+          <table class="data">
+            <thead>
+              <tr>
+                <th style="width:22%;">Experiment</th>
+                <th style="width:19%;">Observed Result</th>
+                <th style="width:24%;">Root Cause on Intel Xe2</th>
+                <th style="width:35%;">Actionable Takeaway</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>INK2_GRF=256</code> <span class="c-muted">(Global)</span></td>
+                <td class="c-rose mono"><strong>65.65 tok/s</strong> <span class="c-muted">(-14 tok/s)</span></td>
+                <td>Halves thread occupancy across <em>all</em> bandwidth-bound decode kernels, killing memory latency hiding.</td>
+                <td>Drove Pass 3B's <strong>dual-module dispatch</strong> (<code>mod256</code> only for spilling <code>gateup_*_xmx</code>; <code>mod128</code> everywhere else).</td>
+              </tr>
+              <tr>
+                <td><strong>FP16 Dot Q8_0 Decode</strong></td>
+                <td class="c-rose mono"><strong>71.31 tok/s</strong></td>
+                <td>Converting <code>int8 → fp16</code> per weight costs extra ALU &amp; lacks DP4A's 4-way packed INT8 throughput.</td>
+                <td>Skipped FP16 unpack on decode; jumped straight to native <strong>Q8_1 + HW DP4A</strong> (<code>dot_acc_sat</code>) in Pass 4.</td>
+              </tr>
+              <tr>
+                <td><code>INK2_BIGX4=1</code> <span class="c-muted">(FP32)</span></td>
+                <td class="c-rose mono"><strong>66.33 tok/s</strong> <span class="c-muted">(-13 tok/s)</span></td>
+                <td>4× register pressure in FP32 spills / lowers occupancy before DP4A shrinks accumulator footprint.</td>
+                <td>Only pair <code>bigx4</code> tiling with compact INT8 <strong>DP4A + <code>KERNEL(64)</code></strong> (Pass 4–6).</td>
+              </tr>
+              <tr>
+                <td><code>gateup_q8_dp4a</code></td>
+                <td class="c-amber mono"><strong>0.494 vs 0.451 ms</strong> <span class="c-muted">(+43 µs)</span></td>
+                <td>Small row geometry doesn't amortize Q8_1 setup vs clean FP32.</td>
+                <td>Reverted selectively in Pass 5 — <strong>per-kernel profiling</strong> beats blanket ISA swaps.</td>
+              </tr>
+              <tr>
+                <td><code>gemv_bigx2_dp4a</code> <span class="c-muted">(P6 A/B)</span></td>
+                <td class="c-amber mono"><strong>2.902 vs 2.711 ms</strong><br><span style="font-size:10px; color:var(--text-muted);">83.74 vs 84.87 tok/s</span></td>
+                <td>Halving output-row reuse doubles Q8_1 activation bandwidth reads vs 4-row sharing in <code>bigx4</code>.</td>
+                <td>Kept <strong><code>gemv_bigx4_dp4a</code></strong> as verified winner (+1.13 tok/s faster in Pass 6 A/B test).</td>
+              </tr>
+              <tr>
+                <td><code>INK2_EXPK / ROWS / FD1</code></td>
+                <td class="c-amber mono"><strong>Neutral / Worse</strong></td>
+                <td>Altering split-K / expert partitioning increased reduction overhead or worsened wave tails.</td>
+                <td>Kept clean partitioning; achieved 9.0 exact waves cleanly via <code>KERNEL(64)</code> in Pass 6 instead.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="grid-3">
+          <div class="card accent-cyan">
+            <div class="card-title">Rule 1: Hardware Timestamps First</div>
+            <div style="font-size:12.2px; color:#cbd5e1; line-height:1.42;">
+              Level Zero kernel timers separated real wins (<code>attn_b_xmx</code> 20× faster, <code>down_nvfp4d</code> -96 µs) from subtle traps (<code>bigx2</code> +191 µs, <code>gateup_q8_dp4a</code> +43 µs).
+            </div>
+          </div>
+          <div class="card accent-emerald">
+            <div class="card-title emerald">Rule 2: Bit-Exact Accuracy Gating</div>
+            <div style="font-size:12.2px; color:#cbd5e1; line-height:1.42;">
+              Every pass cleared greedy parity (<code>64/64</code> exact vs <code>NOXMX+NODP4A</code>) plus sliding-window wrap checks (<code>ring=1280</code>, rel L2 <code>1.59e-4–2.98e-4</code>, top-4 identical).
+            </div>
+          </div>
+          <div class="card accent-amber">
+            <div class="card-title amber">Rule 3: Zero-Spill Compiler Audits</div>
+            <div style="font-size:12.2px; color:#cbd5e1; line-height:1.42;">
+              Checking <code>ocloc</code> spill reports eliminated 2.1–5.8 KB spills in Pass 3B and confirmed <strong>0 warnings, 0 register spills</strong> across Pass 6 XMX FlashAttention.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="slide-footer">
+        <span>12 · DEAD ENDS &amp; ENGINEERING DISCIPLINE</span>
+        <span>Slide 13 / 17</span>
+      </div>
+    </section>
+
+    <!-- ==================== SLIDE 14: PASS 6 VERIFIED ==================== -->
+    <section class="slide" data-title="Pass 6 (Verified): Xe2 XMX FlashAttention & 9.0-Wave Decode" data-sub="84.94 tok/s decode · Flat ~900 tok/s prefill to 14.6K (16.71 s!)">
+      <div class="slide-header">
+        <div>
+          <div class="slide-kicker"><span class="dot"></span>13 · Optimization Pass 6 — VERIFIED</div>
+          <h2 class="slide-title">Pass 6 — Xe2 XMX DPAS FlashAttention &amp; 9.0-Wave Decode</h2>
+          <p class="slide-subtitle">Zero warnings, zero register spills — flat ~900+ tok/s prefill through 14.6K (10.2× faster) and 84.94 tok/s bit-exact decode</p>
+        </div>
+        <div class="header-metric" style="border-color:rgba(16,185,129,0.55);" id="p6-header-metric">
+          <div class="val c-emerald">916.8 tok/s</div>
+          <div class="lbl">Peak Prefill · 84.94 tok/s Decode</div>
+        </div>
+      </div>
+
+      <div class="slide-body">
+        <div class="grid-2">
+          <!-- Left: ink2_attn_b_xmx + Wave Alignment -->
+          <div class="col">
+            <div class="card accent-cyan">
+              <div class="card-title"><code>ink2_attn_b_xmx</code>: Xe2 XMX FlashAttention <span class="badge emerald">20× Faster Attn</span></div>
+              <ul class="clean">
+                <li><strong>Geometry:</strong> <code>KERNEL(128)</code>, 8 subgroups, <code>5</code> tokens × <code>3</code> GQA heads = <strong>15 DPAS columns/WG</strong>.</li>
+                <li><strong>Zero-Wrap 64-Key Tiles:</strong> cleanly divides <code>ring=1280</code> (<code>20 × 64</code>) so K/V tiles never straddle the ring wrap boundary!</li>
+                <li><strong>Hardware 2D Block Reads:</strong> Xe2 LSC <code>16b_8r16x1c</code> + <code>transform_16b_16r16x1c</code> feed DPAS directly with <strong>0 spills</strong>.</li>
+                <li><strong>Fast-Path Math:</strong> uniform <code>has_rel</code> skip for <code>dist &gt;= 1024</code> + online sink softmax (<code>mrun=0, lrun=1</code>). At 256-tok, attention takes only <strong><code>2.256 ms (0.8%)</code></strong>!</li>
+              </ul>
+            </div>
+
+            <div class="card accent-emerald grow">
+              <div class="card-title emerald">Decode Micro-Optimizations (81.79 → 84.94 tok/s) <span class="badge emerald">100% Bit-Exact</span></div>
+              <ul class="clean emerald">
+                <li><strong>32 Xe-core exact wave alignment (<code>288</code> WGs = 9.0 waves):</strong> <code>KERNEL(64)</code> on <code>down_nvfp4d</code> (<code>-96 µs</code>), <code>down_q8_dp4a</code> (<code>-25 µs</code>), <code>gemv_conv2s_dp4a</code> (<code>-5 µs</code>).</li>
+                <li><strong>Hoisted <code>vload16</code> (<code>nv_dot32_v</code>):</strong> hoisted activation loads in <code>gateup_nvfp4c</code> (<code>-12 µs</code>) &amp; <code>down_nvfp4d</code>.</li>
+                <li><strong>Bit-exact token SHA parity:</strong> <code>p8</code> (64 tok) <code>461ed727d292d70f</code> (<code>equal=YES</code>, <strong><code>84.94 tok/s</code></strong>); <code>fib</code> (64 tok) <code>fdf5a5a7e5bcb52d</code> (<code>equal=YES</code>, <code>82.84 tok/s</code>); wrap rel L2 <code>1.59e-4–2.98e-4</code>.</li>
+              </ul>
+            </div>
+          </div>
+
+          <!-- Right: Verified Prefill & Decode Tables -->
+          <div class="col">
+            <div class="card accent-amber">
+              <div class="card-title amber">Flat ~900+ tok/s Prefill Scaling (256 → 128K!) <span class="badge emerald">VERIFIED</span></div>
+              <table class="data">
+                <thead>
+                  <tr>
+                    <th>Prompt Length</th>
+                    <th class="r">Pass 3B</th>
+                    <th class="r">Pass 6 (XMX Attn)</th>
+                    <th class="r">Wall Time</th>
+                    <th class="r">Decode</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><strong>512 tokens</strong></td>
+                    <td class="r c-muted">742.5</td>
+                    <td class="r c-emerald"><strong>916.8 tok/s</strong></td>
+                    <td class="r">0.558 s</td>
+                    <td class="r c-cyan">82.94 t/s</td>
+                  </tr>
+                  <tr>
+                    <td><strong>4,096 tokens</strong></td>
+                    <td class="r c-muted">504.1</td>
+                    <td class="r c-emerald"><strong>899.5 tok/s</strong></td>
+                    <td class="r">4.554 s</td>
+                    <td class="r c-cyan">77.23 t/s</td>
+                  </tr>
+                  <tr>
+                    <td><strong>14.6K Hermes</strong></td>
+                    <td class="r c-muted">340.1</td>
+                    <td class="r c-emerald"><strong>873.5 tok/s</strong></td>
+                    <td class="r">16.71 s</td>
+                    <td class="r c-cyan">67.06 t/s</td>
+                  </tr>
+                  <tr>
+                    <td><strong>65,536 (64K)</strong></td>
+                    <td class="r c-muted">~110 (VK)</td>
+                    <td class="r c-amber"><strong>782.0 tok/s</strong></td>
+                    <td class="r c-amber"><strong>1.40 min</strong></td>
+                    <td class="r c-amber">41.23 t/s</td>
+                  </tr>
+                  <tr>
+                    <td><strong>131,072 (128K)</strong></td>
+                    <td class="r c-muted">OOM (VK)</td>
+                    <td class="r c-amber"><strong>689.6 tok/s</strong></td>
+                    <td class="r c-amber"><strong>3.17 min</strong></td>
+                    <td class="r c-amber">27.56 t/s</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="card grow" id="p6-metrics-slot">
+              <!-- Populated dynamically from METRICS.pass6 -->
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="slide-footer">
+        <span>13 · PASS 6 VERIFIED — Xe2 XMX FLASHATTENTION &amp; 9.0-WAVE DECODE</span>
+        <span>Slide 14 / 17</span>
+      </div>
+    </section>
+
+    <!-- ==================== SLIDE 15: HIGH-CONTEXT SCALING TO 384K ==================== -->
+    <section class="slide" data-title="High-Context Scaling to 384K on 32 GiB B70" data-sub="32.28 KB/tok global KV · 64K in 1.40 min (7.2× Vulkan) · 128K in 3.17 min · 320K default / 384K max">
+      <div class="slide-header">
+        <div>
+          <div class="slide-kicker"><span class="dot"></span>14 · Extreme Context Scaling</div>
+          <h2 class="slide-title">High-Context Scaling: 64K → 384K on a Single 32 GiB B70</h2>
+          <p class="slide-subtitle">40/48 sliding visits stay fixed at 210 MB — only 32.28 KB/tok marginal global KV unlocks 384K max (320K live default!)</p>
+        </div>
+        <div class="header-metric" style="border-color:rgba(0,212,255,0.55);">
+          <div class="val c-cyan">384K Max</div>
+          <div class="lbl">30.94 GB (320K Default)</div>
+        </div>
+      </div>
+
+      <div class="slide-body">
+        <div class="grid-2-wide-l">
+          <!-- Left: Interactive Long-Context Prefill + Decode Scaling Chart -->
+          <div class="card">
+            <div class="card-title">
+              <span>Measured Prefill (bars) &amp; Decode (line) · 256 → 128K Tokens</span>
+              <span class="badge cyan">Hover for exact stats</span>
+            </div>
+            <div class="chart-wrap" id="chart-longctx"></div>
+            <div style="display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:10.3px; color:var(--text-secondary); padding-top:6px; border-top:1px solid var(--border);">
+              <span>Quadratic fit (R²=0.99999): <strong class="c-cyan">t(N) ≈ 1.11e-3·N + 2.6e-9·N²</strong></span>
+              <span>Full 320K cold: <strong class="c-amber">~10.7 min</strong> (Turn-2+: <strong class="c-emerald">&lt;100 ms</strong>)</span>
+            </div>
+          </div>
+
+          <!-- Right: VRAM Fit Table + Vulkan Comparison Callout -->
+          <div class="col">
+            <div class="card accent-cyan">
+              <div class="card-title">32 GiB B70 VRAM Fit (<code>32.28 KB/tok</code> Marginal KV) <span class="badge emerald">Fixed 210 MB Sliding</span></div>
+              <table class="data">
+                <thead>
+                  <tr>
+                    <th>Context Limit</th>
+                    <th class="r">VRAM on Card</th>
+                    <th class="r">15-Step Decode</th>
+                    <th class="r">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>65,536</code> (64K)</td>
+                    <td class="r">20.11 GB</td>
+                    <td class="r c-cyan">87.34 tok/s</td>
+                    <td class="r c-muted">64K in 1.40m</td>
+                  </tr>
+                  <tr>
+                    <td><code>131,072</code> (128K)</td>
+                    <td class="r">22.28 GB</td>
+                    <td class="r c-cyan">87.43 tok/s</td>
+                    <td class="r c-muted">128K in 3.17m</td>
+                  </tr>
+                  <tr>
+                    <td><code>262,144</code> (256K)</td>
+                    <td class="r">26.61 GB</td>
+                    <td class="r c-cyan">87.38 tok/s</td>
+                    <td class="r c-muted">Verified</td>
+                  </tr>
+                  <tr style="background:rgba(16,185,129,0.10);">
+                    <td><strong class="c-emerald"><code>327,680</code> (320K)</strong></td>
+                    <td class="r c-emerald"><strong>28.78 GB</strong>*</td>
+                    <td class="r c-emerald"><strong>87.48 tok/s</strong></td>
+                    <td class="r c-emerald"><strong>Live Default</strong></td>
+                  </tr>
+                  <tr>
+                    <td><code>360,448</code> (352K)</td>
+                    <td class="r">29.86 GB</td>
+                    <td class="r c-cyan">87.32 tok/s</td>
+                    <td class="r c-muted">Verified</td>
+                  </tr>
+                  <tr style="background:rgba(245,158,11,0.09);">
+                    <td><strong class="c-amber"><code>393,216</code> (384K)</strong></td>
+                    <td class="r c-amber"><strong>30.94 GB</strong></td>
+                    <td class="r c-amber"><strong>87.25 tok/s</strong></td>
+                    <td class="r c-amber"><strong>Max Verified</strong></td>
+                  </tr>
+                </tbody>
+              </table>
+              <div style="font-family:var(--font-mono); font-size:10px; color:var(--text-muted); margin-top:6px;">
+                *320K w/ <code>--serve</code> dual prefix cache = <strong>29.21 GB</strong> (~4.8 GiB free). 384K = 28.82 GiB / 32 GiB.
+              </div>
+            </div>
+
+            <div class="card accent-amber grow">
+              <div class="card-title amber">5× Vulkan's Context in the Same ~10 Min Window <span class="badge amber">7.2× @ 64K</span></div>
+              <ul class="clean amber" style="gap:6px;">
+                <li><strong>64K Prefill:</strong> <code>83.81 s</code> (<strong><code>1.40 min</code></strong>, <code>782 tok/s</code>) — <strong>~7.2× faster</strong> than Vulkan's ~10 min @ 64K.</li>
+                <li><strong>128K Prefill:</strong> <code>190.07 s</code> (<strong><code>3.17 min</code></strong>, <code>690 tok/s</code>) — <strong>2× Vulkan's max context in &lt;1/3 the time</strong>.</li>
+                <li><strong>320K Projected:</strong> <strong><code>~10.7 min</code></strong> cold — <strong>5× Vulkan's 64K context</strong> in the same ~10 min budget, then <strong>&lt;100 ms</strong> cached!</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="slide-footer">
+        <span>14 · HIGH-CONTEXT SCALING TO 384K ON INTEL ARC PRO B70 (32 GiB)</span>
+        <span>Slide 15 / 17</span>
+      </div>
+    </section>
+
+    <!-- ==================== SLIDE 16: PASS 7 LIVE SERVING, BIT-EXACT PARITY & ROADMAP ==================== -->
+    <section class="slide" data-title="Pass 7 (Verified): Bit-Exact Prefix Cache, Live Server & Roadmap" data-sub="match=True (sha=5c3802fb70b21af4) · 320K default · 89.7 ms cached TTFT">
+      <div class="slide-header">
+        <div>
+          <div class="slide-kicker"><span class="dot"></span>15 · Pass 7 Production Serving &amp; Verification</div>
+          <h2 class="slide-title">Pass 7 — Bit-Exact Prefix Cache, 320K Live Server &amp; Roadmap</h2>
+          <p class="slide-subtitle">Live OpenAI HTTP serving (<code>127.0.0.1:8080</code>, default <code>CTX=327,680</code>) with 100% bit-exact prefix cache parity &amp; clean CI gates</p>
+        </div>
+        <div class="header-metric" style="border-color:rgba(16,185,129,0.55);">
+          <div class="val c-emerald">match=True</div>
+          <div class="lbl">89.7 ms Cached · 269× Faster</div>
+        </div>
+      </div>
+
+      <div class="slide-body">
+        <div class="grid-2-wide-l">
+          <!-- Left: Dual Prefix Cache Architecture + Live HTTP Benchmarks -->
+          <div class="col">
+            <div class="card accent-emerald">
+              <div class="card-title emerald">Bit-Exact Dual GPU Prefix KV/Conv Cache <span class="badge emerald">434 MB · sha Verified</span></div>
+              <ul class="clean emerald" style="margin-bottom:8px;">
+                <li><strong>Two GPU slots in <code>xpu-inkling2 --serve</code>:</strong> <code>ckpt_sys</code> (before first <code>&lt;|message_user|&gt;</code>) + <code>ckpt_last</code> (at <code>ids.len - 1</code>; final token via 12 ms <code>stepV2</code>). Only <code>2 × 217 MB = 434 MB</code> VRAM; 8 global KVs stay append-only (<code>p0 &lt; ckpt.len</code>).</li>
+                <li><strong>100% Bit-Exact Cache Parity (XMX + DP4A):</strong> Turn-2 cached vs cold <strong><code>match=True</code></strong> (<code>sha = 5c3802fb70b21af4</code>), <code>74.6 ms</code> vs <code>613.5 ms</code> (<code>8.2×</code> on 542-tok synthetic; <strong><code>255×–269×</code></strong> on 20.3K Hermes!).</li>
+              </ul>
+
+              <table class="data">
+                <thead>
+                  <tr>
+                    <th>Live HTTP Benchmark (<code>:8080</code>)</th>
+                    <th class="r">Tokens</th>
+                    <th class="r">TTFT / Wall</th>
+                    <th class="r">Decode</th>
+                    <th class="r">Result / Gain</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><strong>HTTP Smoke</strong> (<code>17*23</code>, <code>effort=low</code>)</td>
+                    <td class="r">short</td>
+                    <td class="r">0.66 s wall</td>
+                    <td class="r c-cyan"><strong>81.72 tok/s</strong></td>
+                    <td class="r c-emerald"><code>'391'</code> ✓</td>
+                  </tr>
+                  <tr>
+                    <td><strong>542-tok Parity</strong> (cached vs cold)</td>
+                    <td class="r">542</td>
+                    <td class="r c-emerald"><strong>74.6 ms</strong></td>
+                    <td class="r c-muted">vs 613.5 ms</td>
+                    <td class="r c-emerald"><strong>8.2× · match=True</strong></td>
+                  </tr>
+                  <tr>
+                    <td><strong>20.3K Hermes Turn 1</strong> <span class="c-muted">(COLD)</span></td>
+                    <td class="r">20,331</td>
+                    <td class="r c-amber"><strong>24.15 s</strong></td>
+                    <td class="r">61.59 tok/s</td>
+                    <td class="r">841.8 tok/s</td>
+                  </tr>
+                  <tr>
+                    <td><strong>20.3K Turn 2</strong> (<code>ckpt_last</code> HIT)</td>
+                    <td class="r">20,353</td>
+                    <td class="r c-emerald"><strong>94.8 ms</strong></td>
+                    <td class="r c-emerald">61.73 tok/s</td>
+                    <td class="r c-emerald"><strong>255×!</strong> (<code>'400'</code>)</td>
+                  </tr>
+                  <tr>
+                    <td><strong>New Chat · Same Sys</strong> (<code>ckpt_sys</code>)</td>
+                    <td class="r">20,332</td>
+                    <td class="r c-emerald"><strong>89.7 ms</strong></td>
+                    <td class="r c-emerald">61.66 tok/s</td>
+                    <td class="r c-emerald"><strong>269×!</strong> (<code>'144'</code>)</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="callout emerald" style="padding:8px 13px; font-size:12px;">
+              <span class="badge emerald">CI GATES</span>
+              <span><code>test-inkling2-host</code>: <strong>24/28 passed</strong> (4 skipped, 0 failed) · <code>lean_check.py</code>: <strong>231 vs 241</strong> (0 new, -10 net) · <code>zig fmt --check</code>: <strong>PASS</strong></span>
+            </div>
+          </div>
+
+          <!-- Right: OpenAI Tool-Calling Compatibility + Crisp Remaining Roadmap -->
+          <div class="col">
+            <div class="card accent-cyan">
+              <div class="card-title">OpenAI / Hermes API (<code>inkling2_serve.py</code>) <span class="badge cyan">320K Default</span></div>
+              <ul class="clean">
+                <li><strong>Native Tool Calling:</strong> <code>tools</code> passthrough + JSON-string <code>arguments</code> canonicalization; parses <code>&lt;|content_invoke_tool_json|&gt;</code> → OpenAI <code>tool_calls</code> (<code>finish_reason: "tool_calls"</code>).</li>
+                <li><strong>Verified Live:</strong> <code>get_weather</code> (Austin) returns valid reasoning + <code>{"city":"Austin"}</code>; <code>reasoning_effort</code> passthrough &amp; graceful <code>top_p</code> tolerance; default <code>CTX=327,680</code> fits in <code>29.21 GB</code> (~4.8 GiB free).</li>
+              </ul>
+            </div>
+
+            <div class="card accent-violet grow">
+              <div class="card-title violet">Crisp Remaining Roadmap <span class="badge violet">Next Up</span></div>
+              <ul class="clean violet">
+                <li><strong>Level Zero Record-Replay Command Lists:</strong> capture the 537-kernel decode graph with mutable position/KV args — eliminates the final <strong>~1.0% host dispatch gap</strong> (<code>84.94 → ~85.8+ tok/s</code>).</li>
+                <li><strong>Upstream Vulkan <code>DEPTH_MIX</code> SIMD16 Fix:</strong> replace the <code>BLOCK=512</code> assumption (<code>gl_NumSubgroups &lt;= gl_SubgroupSize</code>) so <code>llama.cpp</code> Vulkan clears all 33 Xe2 <code>test-backend-ops</code> failures.</li>
+                <li><strong>Multi-Session Prefix Eviction / LRU:</strong> expand the 434 MB dual-slot checkpoint cache into an N-slot LRU pool for concurrent Hermes agent sessions.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="slide-footer">
+        <span>15 · PASS 7 VERIFIED (BIT-EXACT PREFIX CACHE &amp; 320K LIVE SERVING) · ALL METRICS VERIFIED ON INTEL ARC PRO B70</span>
+        <span>Slide 16 / 17</span>
+      </div>
+    </section>
+
+    <!-- ==================== SLIDE 17: PASS 8 NATIVE Xe2 XMX MULTIMODAL VISION ==================== -->
+    <section class="slide" data-title="Pass 8 (Verified): Native Xe2 XMX Multimodal Vision" data-sub="mmproj-F16.gguf · 52.2 ms @ 640px · 0.0 ms cached Turn-2 · 100% OCR & Geometry">
+      <div class="slide-header">
+        <div>
+          <div class="slide-kicker"><span class="dot"></span>16 · Optimization Pass 8 — Native Xe2 XMX Vision</div>
+          <h2 class="slide-title">Pass 8 — Native Xe2 XMX Multimodal Vision (<code>mmproj-F16.gguf</code>)</h2>
+          <p class="slide-subtitle">264-line OpenCL C XMX ViT (<code>vit.cl</code>, 0 warnings, 0 spills) with zero-copy GPU image pooling &amp; automatic multi-turn prefix caching</p>
+        </div>
+        <div class="header-metric" style="border-color:rgba(139,92,246,0.55);">
+          <div class="val c-violet">52.2 ms</div>
+          <div class="lbl">640×640 ViT · 0 ms Turn-2 Hit</div>
+        </div>
+      </div>
+
+      <div class="slide-body">
+        <div class="grid-2-wide-l">
+          <!-- Left: Architecture + Resolution Latency Sweep Chart -->
+          <div class="col">
+            <div class="card accent-violet" style="padding:12px 15px;">
+              <div class="card-title violet" style="margin-bottom:7px;">
+                <span><code>vit.cl</code> Xe2 XMX Vision Stack (<code>inkling2v</code> · 318M · 610 MB)</span>
+                <span class="badge emerald">0 Warnings · 0 Spills</span>
+              </div>
+              <ul class="clean violet" style="gap:5px; font-size:12.2px;">
+                <li><strong>23-Layer ViT (422 F16/F32 tensors):</strong> <code>D=1024</code>, <code>FF=4096</code>, 16 heads (<code>d_head=64</code>), <code>patch=20</code>, LayerNorm + LayerScale (<code>ls1/ls2</code>), bilinear 32×32 pos-emb resize, 2D RoPE (<code>θ=10000</code> GGML normal), <code>GELU_ERF</code>, 2×2 merge (drop CLS) → <code>4096→4096→2304</code> MLP.</li>
+                <li><strong>2 Native XMX Kernels:</strong> <code>vit_gemm_f16_xmx</code> (<code>16×64</code> DPAS <code>k16</code> for <code>K=1200/1024/4096</code> + bias/<code>GELU_ERF</code>) &amp; <code>vit_attn_xmx</code> (bidirectional DPAS FlashAttention, 16 Q/WG, 64-key tiles, <code>13 KB</code> SLM).</li>
+                <li><strong>Zero-Copy Prefix-Cache Integration (<code>ink2_embed_mix_b</code>):</strong> injects <code>[N_img, 2304]</code> directly into <code>S[0]</code> <em>without</em> <code>embed_norm</code> via negative IDs (<code>0x80000000+off</code>) — <code>PrefixCkpt</code> caches image chats for free! Only <strong><code>+0.79 GB</code></strong> VRAM (<code>610 MB</code> + 16,384-tok GPU pool) → <strong><code>27.40 GB</code></strong> (<code>25.52 GiB</code>) @ <code>256K</code>.</li>
+              </ul>
+            </div>
+
+            <div class="card grow" style="padding:12px 15px;">
+              <div class="card-title" style="margin-bottom:6px;">
+                <span>Measured Resolution Latency Sweep (ViT Encode + LLM Prefill)</span>
+                <span class="badge cyan">Hover bars for exact stats</span>
+              </div>
+              <div class="chart-wrap" id="chart-vision"></div>
+            </div>
+          </div>
+
+          <!-- Right: 3 Live HTTP Multimodal Validation Cards -->
+          <div class="col">
+            <div class="card accent-cyan" style="padding:12px 15px;">
+              <div class="card-title" style="margin-bottom:6px;">
+                <span>1. Exact OCR (<code>640×640</code> · 256 img tok)</span>
+                <span class="badge emerald">100% EXACT</span>
+              </div>
+              <div style="font-size:12px; color:var(--text-secondary); margin-bottom:6px;">
+                Input image: <code>"ARC PRO B70 / 32GB GDDR6 / 84.9 TOK/S"</code>
+              </div>
+              <div class="code-block" style="padding:7px 10px; font-size:11px; margin-bottom:7px;"><span class="fn">"ARC PRO B70\n32GB GDDR6\n84.9 TOK/S"</span></div>
+              <div style="display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:11px;">
+                <span>ViT: <strong class="c-amber">72.7 ms</strong> cold / <strong class="c-cyan">52.2 ms</strong> warm</span>
+                <span>Decode: <strong class="c-emerald">82.6 tok/s</strong></span>
+              </div>
+            </div>
+
+            <div class="card accent-emerald" style="padding:12px 15px;">
+              <div class="card-title emerald" style="margin-bottom:6px;">
+                <span>2. Non-Square Geometry (<code>800×400</code> · 200 tok)</span>
+                <span class="badge emerald">100% EXACT</span>
+              </div>
+              <div style="font-size:12px; color:var(--text-secondary); margin-bottom:6px;">
+                Validates bilinear pos-emb + non-square 2D RoPE + 2×2 merge + RGB (red circle L, green triangle C, blue square R):
+              </div>
+              <div class="code-block" style="padding:7px 10px; font-size:11px; margin-bottom:7px;"><span class="fn">"Red circle, green triangle, blue square."</span></div>
+              <div style="display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:11px;">
+                <span>ViT: <strong class="c-cyan">36.4 ms</strong></span>
+                <span>1080p (1,296 tok): <strong class="c-amber">463.7 ms</strong> · <strong class="c-emerald">80.2 t/s</strong></span>
+              </div>
+            </div>
+
+            <div class="card accent-amber grow" style="padding:12px 15px;">
+              <div class="card-title amber" style="margin-bottom:6px;">
+                <span>3. Multi-Turn Image Cache (Turn 2 · <code>800×400</code>)</span>
+                <span class="badge amber">0.0 ms VISION!</span>
+              </div>
+              <div style="font-size:12px; color:#e2e8f0; line-height:1.42; margin-bottom:8px;">
+                Follow-up on same image: <em>"Which color is the shape in the middle?"</em> → <strong class="c-emerald"><code>"Green"</code></strong>
+              </div>
+              <div class="spec-grid" style="grid-template-columns:1fr; gap:5px; margin-top:auto;">
+                <div class="spec-item"><span class="k">SHA256 GPU Image Pool Hit</span><span class="v c-emerald">vision_ms = 0.0 ms!</span></div>
+                <div class="spec-item"><span class="k"><code>PrefixCkpt</code> Image-Token Hit</span><span class="v c-cyan">prompt_ms = 71.2 ms</span></div>
+                <div class="spec-item"><span class="k">Turn-2 HTTP Decode (<code>CTX=256K</code>)</span><span class="v c-amber">82.2 tok/s</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="slide-footer">
+        <span>16 · PASS 8 VERIFIED — NATIVE Xe2 XMX MULTIMODAL VISION (mmproj-F16.gguf · HTTP /v1/chat/completions)</span>
+        <span>Slide 17 / 17</span>
+      </div>
+    </section>
+
+  </div><!-- /#deck-scaler -->
+</div><!-- /#stage -->
+
+<!-- Tooltip -->
+<div id="tooltip"><div class="tt-title"></div><div class="tt-body"></div></div>
+
+<!-- Floating HUD -->
+<div id="hud">
+  <button id="btn-prev" title="Previous (←)">‹</button>
+  <span class="counter" id="hud-counter">1 / 17</span>
+  <button id="btn-next" title="Next (→ / Space)">›</button>
+  <button id="btn-grid" title="Overview Grid (G)">⊞</button>
+  <button id="btn-fs" title="Fullscreen (F)">⛶</button>
+</div>
+
+<!-- Progress Bar -->
+<div id="progress-track"><div id="progress-fill"></div></div>
+
+<!-- Overview Grid Modal -->
+<div id="overview">
+  <div class="ov-head">
+    <div>
+      <div style="font-family:var(--font-mono); font-size:11px; color:var(--cyan); letter-spacing:0.12em;">SLIDE OVERVIEW</div>
+      <div style="font-size:20px; font-weight:750;">Inkling-2-Mini × Intel Arc Pro B70 Optimization Journey</div>
+    </div>
+    <button id="btn-ov-close" style="background:var(--bg-card); border:1px solid var(--border-bright); color:var(--text-primary); border-radius:7px; padding:7px 14px; cursor:pointer; font-family:var(--font-mono); font-size:12px;">ESC / G · Close</button>
+  </div>
+  <div class="ov-grid" id="ov-grid"></div>
+</div>
+
+<script>
+/* ============================================================================
+ * CENTRAL BENCHMARK METRICS — Edit here to update Pass 6 results in 10 seconds!
+ * ============================================================================ */
+const METRICS = {
+  hardware: {
+    gpu: "Intel Arc Pro B70 (BMG-G31 / Xe2)",
+    vramGB: 32,
+    peakBwGBs: 608,
+    xeCores: 32,
+    tdpW: 275,
+    clockMHz: 2800
+  },
+  model: {
+    name: "Inkling-2-Mini-UD-Q4_K_XL.gguf",
+    sizeGiB: 16.41,
+    activeExperts: "Top-8 / 128",
+    layerVisits: 48
+  },
+  decode: [
+    { id: "vk-def",   label: "Vulkan\nDefault",   short: "VK Def",   cold: 31.74, warm: null,  color: "#f43f5e", note: "Default llama.cpp Vulkan backend; Q8_0 scalar int16 GEMV eats 15.20 ms (50%)" },
+    { id: "vk-sync",  label: "Vulkan\nNo-Async",  short: "VK Sync",  cold: 34.61, warm: null,  color: "#fb7185", note: "GGML_VK_DISABLE_ASYNC=1 (+9.0%)" },
+    { id: "tf-base",  label: "TF XPU\nBaseline",  short: "Base",     cold: 71.00, warm: 73.40, color: "#64748b", note: "Level Zero + OpenCL C baseline · 13.174 ms GPU · 533 launches" },
+    { id: "pass1",    label: "Pass 1\nAsync+Vec", short: "Pass 1",   cold: 76.08, warm: 78.23, color: "#38bdf8", note: "2-slot event ring + ink2_embed_dev + 0-barrier router · 12.275 ms GPU" },
+    { id: "pass2",    label: "Pass 2\nXMX DPAS",  short: "Pass 2",   cold: 78.48, warm: null,  color: "#00d4ff", note: "NVFP4 & Q8_0 bridged to Xe2 XMX DPAS (TMAX=64)" },
+    { id: "pass3b",   label: "Pass 3B\nDual-GRF", short: "Pass 3B",  cold: 79.67, warm: null,  color: "#a78bfa", note: "Mixed 128/256-GRF dispatch + online FlashAttn + TMAX=256" },
+    { id: "pass4",    label: "Pass 4\nDP4A+BF16", short: "Pass 4",   cold: 80.05, warm: null,  color: "#10b981", note: "HW dot_acc_sat + BF16 loop ctl · 11.961 ms · 638 launches · 65.50 @ 14.6K ctx" },
+    { id: "pass5",    label: "Pass 5\nFused Q8",  short: "Pass 5",   cold: 81.79, warm: null,  color: "#2dd4bf", note: "Fused quant4_32 (638→537 launches) · 11.795 ms GPU · 64/64 exact match" },
+    { id: "pass6",    label: "Pass 6\n9-Wave+XMX",short: "Pass 6",   cold: 84.94, warm: null,  color: "#34d399", note: "9.0-wave KERNEL(64) + hoisted vload16 · p8 bit-exact 84.94 tok/s (84.87 63-step) · 11.656 ms GPU (85.8 ceiling)" }
+  ],
+  decodeGpuCeiling: 85.8,
+  decodeLongCtx14k: 67.06,
+
+  prefill: {
+    p256:  [
+      { stage: "P3B+",  tokPerSec: 796.4, color: "#00d4ff" },
+      { stage: "Pass 6",tokPerSec: 914.2, color: "#34d399", sub: "0.28s" }
+    ],
+    p512:  [
+      { stage: "Base",  tokPerSec: 116.2, color: "#64748b" },
+      { stage: "P1",    tokPerSec: 121.1, color: "#38bdf8" },
+      { stage: "P2",    tokPerSec: 311.7, color: "#00d4ff" },
+      { stage: "P3B",   tokPerSec: 742.5, color: "#2dd4bf" },
+      { stage: "P6",    tokPerSec: 916.8, color: "#34d399", sub: "0.56s" }
+    ],
+    p4k: [
+      { stage: "P2",    tokPerSec: 212.1, color: "#00d4ff" },
+      { stage: "P3B",   tokPerSec: 504.1, color: "#2dd4bf" },
+      { stage: "P6",    tokPerSec: 899.5, color: "#34d399", sub: "4.55s" }
+    ],
+    hermes14k: [
+      { stage: "Base",  tokPerSec: 85.0,  ttftSec: 170.0, color: "#f43f5e", approx: true },
+      { stage: "P3B",   tokPerSec: 340.1, ttftSec: 42.9,  color: "#2dd4bf", approx: false }
+    ]
+  },
+
+  /* ==========================================================================
+   * PASS 6, PASS 7 & 384K SCALING — ALL VERIFIED LIVE ON INTEL ARC PRO B70!
+   * ========================================================================== */
+  pass6: {
+    status: "verified",
+    title: "Xe2 XMX DPAS FlashAttention (ink2_attn_b_xmx) + 9.0-Wave Decode",
+    targetHermes14kTokS: 675,
+    targetHermes14kRange: "~650–700 tok/s",
+    targetHermes14kTtftSec: 21.6,
+    actualHermes14kTokS: 873.5,
+    actualHermes14kTtftSec: 16.714,
+    actual4kTokS: 899.5,
+    actual512TokS: 916.8,
+    actual256TokS: 914.2,
+    decodeShortTokS: 84.94,
+    decode63StepTokS: 84.87,
+    decodeFibTokS: 82.84,
+    decode256TokS: 83.84,
+    decode512TokS: 82.94,
+    decode4kTokS: 77.23,
+    decode14kTokS: 67.06,
+    decode32kTokS: 54.82,
+    decode64kTokS: 41.23,
+    decode128kTokS: 27.56,
+    shaP8: "461ed727d292d70f",
+    shaFib: "fdf5a5a7e5bcb52d"
+  },
+
+  pass7: {
+    status: "verified",
+    endpoint: "http://127.0.0.1:8080",
+    defaultCtx: 327680,
+    maxCtxVerified: 393216,
+    vramCacheMB: 434,
+    vramDefault320kWithCacheGB: 29.21,
+    vramMax384kGB: 30.94,
+    marginalGlobalKvKB: 32.28,
+    slidingFixedMB: 210,
+    parityMatch: true,
+    paritySha: "5c3802fb70b21af4",
+    parityCachedMs: 74.6,
+    parityColdMs: 613.5,
+    smokeHttpTokS: 81.72,
+    hermes20kTokens: 20331,
+    hermes20kColdSec: 24.15,
+    hermes20kColdTokS: 841.8,
+    hermes20kTurn2Ms: 94.8,
+    hermes20kNewChatMs: 89.7,
+    hermes20kDecodeTokS: 61.73,
+    ciHostTests: "24/28 passed (4 skipped, 0 failed)",
+    ciLeanCheck: "231 vs 241 (0 new, -10 net)",
+    ciZigFmt: "PASS"
+  },
+
+  longContext: [
+    { label: "256",   tokens: 256,    prefillSec: 0.280,  prefillTokS: 914.2, decodeTokS: 83.84, timeLbl: "0.28s" },
+    { label: "512",   tokens: 512,    prefillSec: 0.558,  prefillTokS: 916.8, decodeTokS: 82.94, timeLbl: "0.56s" },
+    { label: "2K",    tokens: 2048,   prefillSec: 2.259,  prefillTokS: 906.5, decodeTokS: 79.60, timeLbl: "2.26s" },
+    { label: "4K",    tokens: 4096,   prefillSec: 4.554,  prefillTokS: 899.5, decodeTokS: 77.23, timeLbl: "4.55s" },
+    { label: "8K",    tokens: 8192,   prefillSec: 9.204,  prefillTokS: 890.0, decodeTokS: 73.02, timeLbl: "9.2s"  },
+    { label: "14.6K", tokens: 14600,  prefillSec: 16.714, prefillTokS: 873.5, decodeTokS: 67.06, timeLbl: "16.7s" },
+    { label: "32K",   tokens: 32768,  prefillSec: 39.08,  prefillTokS: 838.4, decodeTokS: 54.82, timeLbl: "39.1s" },
+    { label: "64K",   tokens: 65536,  prefillSec: 83.81,  prefillTokS: 782.0, decodeTokS: 41.23, timeLbl: "1.40m" },
+    { label: "128K",  tokens: 131072, prefillSec: 190.07, prefillTokS: 689.6, decodeTokS: 27.56, timeLbl: "3.17m" }
+  ],
+
+  vramFit: [
+    { ctx: 65536,  label: "64K",  vramGB: 20.11, decode15TokS: 87.34 },
+    { ctx: 131072, label: "128K", vramGB: 22.28, decode15TokS: 87.43 },
+    { ctx: 262144, label: "256K", vramGB: 26.61, decode15TokS: 87.38 },
+    { ctx: 327680, label: "320K", vramGB: 28.78, withCacheGB: 29.21, decode15TokS: 87.48, isDefault: true },
+    { ctx: 360448, label: "352K", vramGB: 29.86, decode15TokS: 87.32 },
+    { ctx: 393216, label: "384K", vramGB: 30.94, decode15TokS: 87.25, isMax: true }
+  ],
+
+  pass8Vision: {
+    status: "verified",
+    checkpoint: "mmproj-F16.gguf",
+    weightsMB: 610,
+    paramsM: 318,
+    tensors: 422,
+    vitLines: 264,
+    vramDeltaGB: 0.79,
+    vramTotalAt256kGB: 27.40,
+    vramTotalAt256kGiB: 25.52,
+    ocr640ColdMs: 72.7,
+    ocr640WarmMs: 52.2,
+    ocr640DecodeTokS: 82.6,
+    turn2VisionMs: 0.0,
+    turn2PromptMs: 71.2,
+    turn2DecodeTokS: 82.2,
+    resolutionSweep: [
+      { res: "320×320",   tag: "320px", tokens: 64,   vitMs: 12.7,  llmMs: 133.0,  decodeTokS: 77.8, note: "64 img tokens · ultra-fast icon/UI encode" },
+      { res: "800×400",   tag: "2:1",   tokens: 200,  vitMs: 36.4,  llmMs: 275.9,  decodeTokS: 76.1, note: "200 img tokens · non-square 2D RoPE + bilinear pos-emb ('Red circle, green triangle, blue square.')" },
+      { res: "640×640",   tag: "640px", tokens: 256,  vitMs: 52.2,  llmMs: 368.0,  decodeTokS: 83.7, note: "256 img tokens · 100% exact OCR (72.7 ms cold / 52.2 ms warm)" },
+      { res: "1280×720",  tag: "720p",  tokens: 576,  vitMs: 126.0, llmMs: 730.2,  decodeTokS: 82.6, note: "576 img tokens · HD 720p desktop/screenshot capture" },
+      { res: "1920×1080", tag: "1080p", tokens: 1296, vitMs: 463.7, llmMs: 1594.6, decodeTokS: 80.2, note: "1,296 img tokens · Full HD 1080p ('Dark blue and yellow.')" }
+    ]
+  },
+
+  passBusyEvolution: [
+    { stage: "TF Baseline", ms: 13.174, launches: 533, color: "#64748b", delta: "baseline" },
+    { stage: "Pass 1",      ms: 12.275, launches: 533, color: "#38bdf8", delta: "-0.899 ms" },
+    { stage: "Pass 4",      ms: 11.961, launches: 638, color: "#a78bfa", delta: "-0.314 ms (+105 launches)" },
+    { stage: "Pass 5",      ms: 11.795, launches: 537, color: "#2dd4bf", delta: "-0.166 ms (-101 launches)" },
+    { stage: "Pass 6",      ms: 11.656, launches: 537, color: "#34d399", delta: "-0.139 ms (9.0 waves + vload16)" }
+  ],
+
+  pass6Kernels: [
+    { name: "gemv_bigx4_dp4a",  ms: 2.711, pct: 23.3, cat: "dp4a",  color: "#00d4ff", note: "QKV & O projections · KERNEL(64) · beat bigx2 (2.902 ms)" },
+    { name: "gateup_nvfp4c",    ms: 2.341, pct: 20.1, cat: "nvfp4", color: "#34d399", note: "MoE gate+up · -12 µs via hoisted vload16 · 9.0 exact waves" },
+    { name: "down_nvfp4d",      ms: 1.234, pct: 10.6, cat: "nvfp4", color: "#fbbf24", note: "MoE down · -96 µs (1.330→1.234 ms) via KERNEL(64) 9.0 exact waves!" },
+    { name: "attn2",            ms: 0.865, pct: 7.4,  cat: "attn",  color: "#38bdf8", note: "Decode attention + fused quant4_32 epilogue" },
+    { name: "gemv_conv2s_dp4a", ms: 0.857, pct: 7.4,  cat: "dp4a",  color: "#06b6d4", note: "Gated conv · -5 µs via KERNEL(64) 9.0 exact waves" },
+    { name: "gemv_q8_4_dp4a",   ms: 0.851, pct: 7.3,  cat: "dp4a",  color: "#10b981", note: "LM Head · 492 MB in 0.851 ms = 578.3 GB/s (95.1% peak!)" },
+    { name: "mix3",             ms: 0.818, pct: 7.0,  cat: "vec",   color: "#a78bfa", note: "Vectorized depth mixing across looped visits" },
+    { name: "gateup_q8",        ms: 0.450, pct: 3.9,  cat: "q8",    color: "#818cf8", note: "FP32 path (beat DP4A 0.494 ms)" },
+    { name: "router_k",         ms: 0.412, pct: 3.5,  cat: "ctl",   color: "#c084fc", note: "0-barrier 1-subgroup top-8 router across 48 visits" },
+    { name: "mix3n",            ms: 0.289, pct: 2.5,  cat: "vec",   color: "#94a3b8", note: "Depth mix + norm + fused quant4_32" },
+    { name: "ctl_down_k",       ms: 0.268, pct: 2.3,  cat: "ctl",   color: "#64748b", note: "Vectorized vload4 branchless BF16 loop controller" },
+    { name: "ctl_out2",         ms: 0.226, pct: 1.9,  cat: "ctl",   color: "#64748b", note: "Loop controller output projection" },
+    { name: "down_q8_dp4a",     ms: 0.199, pct: 1.7,  cat: "dp4a",  color: "#22d3ee", note: "Dense/shared down · -25 µs (0.224→0.199 ms) via 9.0 exact waves" },
+    { name: "norm",             ms: 0.093, pct: 0.8,  cat: "other", color: "#475569", note: "RMSNorm with fused quant4_32" },
+    { name: "rest (incl. 4 quant)", ms: 0.041, pct: 0.4, cat: "other", color: "#334155", note: "Embed, argmax, and remaining 4 quant_q8 launches" }
+  ],
+
+  roofline: [
+    { name: "Vulkan Q8_0 scalar int16", low: 62, high: 178, isRange: true, color: "#f43f5e", tag: "15.20 ms (50% decode)" },
+    { name: "TF gemv_bigx4_dp4a",       val: 385,   color: "#38bdf8", tag: "63.3% peak · beat bigx2" },
+    { name: "TF gemv_conv2s_dp4a",      val: 421,   color: "#00d4ff", tag: "69.2% · P6 9.0 waves" },
+    { name: "TF down_nvfp4d (P6 9-wave)",val: 426,  color: "#fbbf24", tag: "70.1% (was 395 @ 2.25w)" },
+    { name: "TF gateup_nvfp4c",         val: 449,   color: "#10b981", tag: "73.8% · 9.0w + vload16" },
+    { name: "Vulkan NVFP4 MUL_MAT_ID",  val: 461.7, color: "#a78bfa", tag: "75.9% · 4.34 ms" },
+    { name: "TF gemv_q8_4_dp4a (LM Head)", val: 578.3, color: "#34d399", tag: "95.1% PEAK! (492 MB / 0.851 ms)" }
+  ]
+};
+
+/* ============================================================================
+ * HELPERS: SVG creation & interactive tooltips
+ * ============================================================================ */
+const SVG_NS = "http://www.w3.org/2000/svg";
+function el(tag, attrs = {}, text = null) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+  if (text !== null) node.textContent = text;
+  return node;
+}
+
+const tooltip = document.getElementById("tooltip");
+const ttTitle = tooltip.querySelector(".tt-title");
+const ttBody = tooltip.querySelector(".tt-body");
+
+function bindTooltip(node, title, body) {
+  node.classList.add("bar-hover");
+  node.addEventListener("mouseenter", (e) => {
+    ttTitle.textContent = title;
+    ttBody.textContent = body;
+    tooltip.style.opacity = "1";
+    moveTooltip(e);
+  });
+  node.addEventListener("mousemove", moveTooltip);
+  node.addEventListener("mouseleave", () => { tooltip.style.opacity = "0"; });
+}
+
+function moveTooltip(e) {
+  const pad = 14;
+  let x = e.clientX + pad;
+  let y = e.clientY + pad;
+  const r = tooltip.getBoundingClientRect();
+  if (x + r.width > window.innerWidth - 10) x = e.clientX - r.width - pad;
+  if (y + r.height > window.innerHeight - 10) y = e.clientY - r.height - pad;
+  tooltip.style.left = x + "px";
+  tooltip.style.top = y + "px";
+}
+
+/* ============================================================================
+ * RENDER HERO Xe-CORES & KPI STRIP (Slide 1)
+ * ============================================================================ */
+function renderHero() {
+  const g = document.getElementById("hero-xecores");
+  for (let row = 0; row < 4; row++) {
+    for (let col = 0; col < 8; col++) {
+      const idx = row * 8 + col;
+      const fill = idx % 7 === 0 ? "rgba(0,212,255,0.34)" : idx % 5 === 0 ? "rgba(16,185,129,0.28)" : "rgba(30,46,77,0.75)";
+      const stroke = idx % 7 === 0 ? "#00d4ff" : idx % 5 === 0 ? "#34d399" : "#2c436e";
+      g.appendChild(el("rect", {
+        x: 6 + col * 36, y: 18 + row * 34, width: 30, height: 28, rx: 4,
+        fill, stroke, "stroke-width": 1
+      }));
+    }
+  }
+
+  const kpis = [
+    { val: `${METRICS.pass6.decodeShortTokS.toFixed(2)} tok/s`, lbl: "Bit-Exact Decode Peak", sub: `2.68× vs Vulkan · 99.0% of ${METRICS.decodeGpuCeiling} ceiling`, cls: "emerald" },
+    { val: `${METRICS.pass6.actual512TokS.toFixed(1)} tok/s`, lbl: "Flat XMX Prefill Peak", sub: `782 @ 64K (1.40m · 7.2× VK) · 384K max`, cls: "" },
+    { val: `${METRICS.pass8Vision.ocr640WarmMs} ms`, lbl: "Native Xe2 XMX Vision", sub: `640px ViT · 0 ms Turn-2 hit · 100% OCR`, cls: "violet" },
+    { val: `${METRICS.pass7.hermes20kNewChatMs} ms`, lbl: "Bit-Exact Cached TTFT", sub: `match=True · 269× vs 24.15s @ 20.3K`, cls: "amber" }
+  ];
+
+  const container = document.getElementById("hero-kpis");
+  container.innerHTML = "";
+  kpis.forEach(k => {
+    const div = document.createElement("div");
+    div.className = `kpi-box ${k.cls}`;
+    div.innerHTML = `<div class="kpi-val">${k.val}</div><div class="kpi-lbl">${k.lbl}</div><div class="kpi-sub">${k.sub}</div>`;
+    container.appendChild(div);
+  });
+}
+
+/* ============================================================================
+ * CHART 1: DECODE THROUGHPUT EVOLUTION (Slide 10)
+ * ============================================================================ */
+function renderDecodeChart() {
+  const wrap = document.getElementById("chart-decode");
+  const W = 560, H = 370;
+  const pad = { t: 28, r: 22, b: 64, l: 46 };
+  const cw = W - pad.l - pad.r;
+  const ch = H - pad.t - pad.b;
+  const maxY = 95;
+  const yOf = v => pad.t + ch - (v / maxY) * ch;
+
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}` });
+
+  // Horizontal gridlines
+  [0, 20, 40, 60, 80].forEach(v => {
+    const y = yOf(v);
+    svg.appendChild(el("line", { x1: pad.l, y1: y, x2: W - pad.r, y2: y, stroke: "#1b2842", "stroke-width": 1 }));
+    svg.appendChild(el("text", { x: pad.l - 8, y: y + 4, "text-anchor": "end", fill: "#64748b", "font-family": "monospace", "font-size": 10.5 }, `${v}`));
+  });
+
+  // GPU-only ceiling line (84.78)
+  const yCeil = yOf(METRICS.decodeGpuCeiling);
+  svg.appendChild(el("line", { x1: pad.l, y1: yCeil, x2: W - pad.r, y2: yCeil, stroke: "#fbbf24", "stroke-width": 1.6, "stroke-dasharray": "5 4" }));
+  svg.appendChild(el("rect", { x: pad.l + 6, y: yCeil - 18, width: 176, height: 15, rx: 3, fill: "rgba(10,16,29,0.88)" }));
+  svg.appendChild(el("text", { x: pad.l + 10, y: yCeil - 7, fill: "#fbbf24", "font-family": "monospace", "font-size": 10, "font-weight": 700 }, `GPU Ceiling: ${METRICS.decodeGpuCeiling} tok/s`));
+
+  // Bars & Trend Line
+  const n = METRICS.decode.length;
+  const step = cw / n;
+  const bw = step * 0.58;
+  const pts = [];
+
+  METRICS.decode.forEach((d, i) => {
+    const cx = pad.l + i * step + step / 2;
+    const x = cx - bw / 2;
+    const primary = d.cold;
+    const y = yOf(primary);
+    const h = yOf(0) - y;
+
+    // Warm ghost bar behind if present
+    if (d.warm) {
+      const yW = yOf(d.warm);
+      const warmRect = el("rect", {
+        x: x + 2, y: yW, width: bw - 4, height: y - yW + 2, rx: 3,
+        fill: "rgba(255,255,255,0.12)", stroke: d.color, "stroke-width": 1, "stroke-dasharray": "3 2"
+      });
+      bindTooltip(warmRect, `${d.short} (Warm: ${d.warm} tok/s)`, `Cold: ${d.cold} tok/s · Warm: ${d.warm} tok/s. ${d.note}`);
+      svg.appendChild(warmRect);
+      svg.appendChild(el("text", {
+        x: cx, y: yW - 5, "text-anchor": "middle", fill: "#cbd5e1", "font-family": "monospace", "font-size": 9.5
+      }, `${d.warm.toFixed(1)}w`));
+    }
+
+    const rect = el("rect", { x, y, width: bw, height: h, rx: 4, fill: d.color });
+    bindTooltip(rect, `${d.label.replace("\n", " ")} — ${d.cold} tok/s`, d.note + (d.warm ? ` (Warm: ${d.warm} tok/s)` : ""));
+    svg.appendChild(rect);
+
+    // Value label
+    svg.appendChild(el("text", {
+      x: cx, y: d.warm ? y + 13 : y - 6, "text-anchor": "middle",
+      fill: d.warm ? "#080e1c" : "#f1f5f9",
+      "font-family": "monospace", "font-size": 10.5, "font-weight": 700
+    }, d.cold.toFixed(1)));
+
+    pts.push(`${cx},${yOf(d.warm || d.cold)}`);
+
+    // X label (2 lines)
+    const lines = d.label.split("\n");
+    lines.forEach((ln, li) => {
+      svg.appendChild(el("text", {
+        x: cx, y: H - pad.b + 16 + li * 13, "text-anchor": "middle",
+        fill: li === 0 ? "#cbd5e1" : "#64748b", "font-family": "monospace", "font-size": 9.5, "font-weight": li === 0 ? 600 : 400
+      }, ln));
+    });
+  });
+
+  // Subtle trend polyline
+  svg.appendChild(el("polyline", {
+    points: pts.join(" "), fill: "none", stroke: "rgba(255,255,255,0.28)", "stroke-width": 1.4
+  }));
+
+  wrap.innerHTML = "";
+  wrap.appendChild(svg);
+}
+
+/* ============================================================================
+ * CHART 2: PREFILL & 14.6K HERMES TTFT EVOLUTION (Slide 10)
+ * ============================================================================ */
+function renderPrefillChart() {
+  const wrap = document.getElementById("chart-prefill");
+  const W = 560, H = 370;
+  const pad = { t: 28, r: 20, b: 64, l: 48 };
+  const cw = W - pad.l - pad.r;
+  const ch = H - pad.t - pad.b;
+  const p6 = METRICS.pass6;
+  const p6Verified = p6.status === "verified" && p6.actualHermes14kTokS != null;
+  const p6Val = p6Verified ? p6.actualHermes14kTokS : p6.targetHermes14kTokS;
+  const p6Ttft = p6Verified ? p6.actualHermes14kTtftSec : p6.targetHermes14kTtftSec;
+  const maxY = 1040;
+  const yOf = v => pad.t + ch - (v / maxY) * ch;
+
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}` });
+
+  [0, 200, 400, 600, 800, 1000].forEach(v => {
+    const y = yOf(v);
+    svg.appendChild(el("line", { x1: pad.l, y1: y, x2: W - pad.r, y2: y, stroke: "#1b2842", "stroke-width": 1 }));
+    svg.appendChild(el("text", { x: pad.l - 8, y: y + 4, "text-anchor": "end", fill: "#64748b", "font-family": "monospace", "font-size": 10.5 }, `${v}`));
+  });
+
+  // Flat ~900 tok/s Pass 6 visual reference line
+  const y900 = yOf(900);
+  svg.appendChild(el("line", { x1: pad.l, y1: y900, x2: W - pad.r, y2: y900, stroke: "rgba(52,211,153,0.45)", "stroke-width": 1.2, "stroke-dasharray": "4 4" }));
+
+  const groups = [
+    {
+      title: "256-tok",
+      bars: METRICS.prefill.p256.map(b => ({ lbl: b.stage, val: b.tokPerSec, color: b.color, sub: b.sub, note: `256-tok prefill (${b.stage}): ${b.tokPerSec} tok/s${b.sub ? " (" + b.sub + ", attn_b_xmx = 0.8%)" : ""}` }))
+    },
+    {
+      title: "512-tok",
+      bars: METRICS.prefill.p512.map(b => ({ lbl: b.stage, val: b.tokPerSec, color: b.color, sub: b.sub, note: `512-tok prefill (${b.stage}): ${b.tokPerSec} tok/s${b.sub ? " (" + b.sub + ", 6.9× vs NOXMX)" : ""}` }))
+    },
+    {
+      title: "4K-tok",
+      bars: METRICS.prefill.p4k.map(b => ({ lbl: b.stage, val: b.tokPerSec, color: b.color, sub: b.sub, note: `4K-tok prefill (${b.stage}): ${b.tokPerSec} tok/s${b.sub ? " (" + b.sub + ")" : ""}` }))
+    },
+    {
+      title: "14.6K Hermes",
+      bars: [
+        ...METRICS.prefill.hermes14k.map(b => ({
+          lbl: b.stage, val: b.tokPerSec, color: b.color,
+          sub: `${b.approx ? "~" : ""}${b.ttftSec}s`,
+          note: `14.6K Hermes Turn-1 (${b.stage}): ${b.approx ? "~" : ""}${b.tokPerSec} tok/s · TTFT ${b.approx ? "~" : ""}${b.ttftSec} s`
+        })),
+        {
+          lbl: p6Verified ? "P6" : "P6*",
+          val: p6Val,
+          color: p6Verified ? "#34d399" : "#f59e0b",
+          dashed: !p6Verified,
+          sub: p6Verified ? `${p6Ttft.toFixed(1)}s` : `~22s`,
+          note: p6Verified
+            ? `Pass 6 VERIFIED (${p6.title}): ${p6Val} tok/s · TTFT ${p6Ttft} s (10.2× vs Base, 2.57× vs P3B)`
+            : `Pass 6 IN FLIGHT (${p6.title}): target ${p6.targetHermes14kRange} (~21–23 s TTFT)`
+        }
+      ]
+    }
+  ];
+
+  // Compute proportional x slots
+  const totalSlots = groups.reduce((s, g) => s + g.bars.length + 0.7, -0.7);
+  const slotW = cw / totalSlots;
+  let cursor = pad.l;
+
+  groups.forEach((g) => {
+    const gStart = cursor;
+    g.bars.forEach((b) => {
+      const bw = Math.min(34, slotW * 0.78);
+      const cx = cursor + slotW / 2;
+      const x = cx - bw / 2;
+      const y = yOf(b.val);
+      const h = yOf(0) - y;
+
+      const rect = el("rect", {
+        x, y, width: bw, height: h, rx: 4,
+        fill: b.dashed ? "rgba(245,158,11,0.22)" : b.color,
+        stroke: b.dashed ? "#fbbf24" : "none",
+        "stroke-width": b.dashed ? 1.8 : 0,
+        "stroke-dasharray": b.dashed ? "5 3" : ""
+      });
+      bindTooltip(rect, `${g.title} · ${b.lbl}`, b.note);
+      svg.appendChild(rect);
+
+      // Value above bar
+      svg.appendChild(el("text", {
+        x: cx, y: y - (b.sub ? 15 : 6), "text-anchor": "middle",
+        fill: b.dashed ? "#fbbf24" : "#f1f5f9",
+        "font-family": "monospace", "font-size": 9.8, "font-weight": 700
+      }, b.dashed ? `~${Math.round(b.val)}` : `${Math.round(b.val)}`));
+
+      if (b.sub) {
+        svg.appendChild(el("text", {
+          x: cx, y: y - 4, "text-anchor": "middle",
+          fill: b.dashed ? "#fde68a" : "#94a3b8",
+          "font-family": "monospace", "font-size": 8.8
+        }, b.sub));
+      }
+
+      // Stage mini label
+      svg.appendChild(el("text", {
+        x: cx, y: H - pad.b + 14, "text-anchor": "middle",
+        fill: b.dashed ? "#fbbf24" : "#94a3b8", "font-family": "monospace", "font-size": 8.8
+      }, b.lbl));
+
+      cursor += slotW;
+    });
+
+    const gEnd = cursor;
+    const gMid = (gStart + gEnd) / 2;
+    svg.appendChild(el("line", { x1: gStart + 4, y1: H - pad.b + 22, x2: gEnd - 4, y2: H - pad.b + 22, stroke: "#2c436e", "stroke-width": 1.2 }));
+    svg.appendChild(el("text", {
+      x: gMid, y: H - pad.b + 38, "text-anchor": "middle",
+      fill: "#e2e8f0", "font-family": "monospace", "font-size": 10.5, "font-weight": 700
+    }, g.title));
+
+    cursor += slotW * 0.7;
+  });
+
+  // Update Pass 6 badge & footnote dynamically
+  const badge = document.getElementById("pass6-chart-badge");
+  if (p6Verified) {
+    badge.className = "badge emerald";
+    badge.textContent = "Pass 6 Verified";
+    document.getElementById("prefill-chart-footnote").innerHTML =
+      `<span>14.6K TTFT: ~170 s → 42.9 s → <strong class="c-emerald">${p6Ttft.toFixed(2)} s (${p6Val} tok/s)</strong></span><span>Pass 7 20.3K cache: <strong class="c-amber">${METRICS.pass7.hermes20kNewChatMs} ms (269×)</strong></span>`;
+  }
+
+  wrap.innerHTML = "";
+  wrap.appendChild(svg);
+}
+
+/* ============================================================================
+ * CHART 3A & 3B: GPU BUSY EVOLUTION & PASS 6 PER-KERNEL BREAKDOWN (Slide 11)
+ * ============================================================================ */
+function renderKernelCharts() {
+  // 3A: Pass Busy Evolution (5 passes)
+  const wrapA = document.getElementById("chart-pass-busy");
+  const W1 = 460, H1 = 205;
+  const svgA = el("svg", { viewBox: `0 0 ${W1} ${H1}` });
+  const maxMs = 15.0;
+  const barX = 104, barMaxW = 240;
+
+  METRICS.passBusyEvolution.forEach((d, i) => {
+    const y = 8 + i * 39;
+    const w = (d.ms / maxMs) * barMaxW;
+    svgA.appendChild(el("text", { x: 4, y: y + 16, fill: d.stage === "Pass 6" ? "#34d399" : "#e2e8f0", "font-family": "monospace", "font-size": 11, "font-weight": 700 }, d.stage));
+    svgA.appendChild(el("rect", { x: barX, y: y + 2, width: barMaxW, height: 20, rx: 4, fill: "#070c18", stroke: "#1b2842" }));
+    const rect = el("rect", { x: barX, y: y + 2, width: w, height: 20, rx: 4, fill: d.color });
+    bindTooltip(rect, `${d.stage} — ${d.ms.toFixed(3)} ms`, `Launches/step: ${d.launches} · Change: ${d.delta}`);
+    svgA.appendChild(rect);
+    svgA.appendChild(el("text", { x: barX + w - 6, y: y + 16, "text-anchor": "end", fill: "#070c18", "font-family": "monospace", "font-size": 10.5, "font-weight": 800 }, `${d.ms.toFixed(3)} ms`));
+
+    const launchColor = d.launches > 600 ? "#fb7185" : d.stage === "Pass 6" ? "#34d399" : "#94a3b8";
+    svgA.appendChild(el("text", { x: barX + barMaxW + 10, y: y + 16, fill: launchColor, "font-family": "monospace", "font-size": 10.5, "font-weight": 700 }, `${d.launches} lnch`));
+  });
+
+  wrapA.innerHTML = "";
+  wrapA.appendChild(svgA);
+
+  // 3B: Exact Pass 6 Per-Kernel Horizontal Bar Chart (15 buckets)
+  const wrapB = document.getElementById("chart-kernels-p5");
+  const W2 = 660, H2 = 445;
+  const svgB = el("svg", { viewBox: `0 0 ${W2} ${H2}` });
+  const lblW = 166, chartX = lblW + 6, maxBarW = 365, maxK = 2.95;
+
+  // Top stacked summary bar of all 15 buckets
+  let stackX = 8;
+  const totalStackW = W2 - 16;
+  const totalMs = 11.656;
+  svgB.appendChild(el("text", { x: 8, y: 14, fill: "#94a3b8", "font-family": "monospace", "font-size": 9.8 }, "PROPORTIONAL PASS 6 STEP COMPOSITION (11.656 ms = 100%)"));
+  METRICS.pass6Kernels.forEach((k) => {
+    const sw = (k.ms / totalMs) * totalStackW;
+    const seg = el("rect", { x: stackX, y: 21, width: Math.max(2, sw - 1), height: 15, rx: 2, fill: k.color });
+    bindTooltip(seg, `${k.name}: ${k.ms.toFixed(3)} ms (${k.pct}%)`, k.note);
+    svgB.appendChild(seg);
+    stackX += sw;
+  });
+
+  // Individual horizontal bars (15 rows)
+  METRICS.pass6Kernels.forEach((k, i) => {
+    const y = 48 + i * 26.2;
+    const w = (k.ms / maxK) * maxBarW;
+
+    svgB.appendChild(el("text", {
+      x: lblW, y: y + 13, "text-anchor": "end",
+      fill: i < 3 ? "#f1f5f9" : "#cbd5e1", "font-family": "monospace", "font-size": 10.6, "font-weight": i < 3 ? 700 : 500
+    }, k.name));
+
+    svgB.appendChild(el("rect", { x: chartX, y: y + 2, width: maxBarW, height: 16, rx: 3, fill: "#070c18" }));
+    const rect = el("rect", { x: chartX, y: y + 2, width: Math.max(4, w), height: 16, rx: 3, fill: k.color });
+    bindTooltip(rect, `${k.name} — ${k.ms.toFixed(3)} ms (${k.pct}%)`, k.note);
+    svgB.appendChild(rect);
+
+    svgB.appendChild(el("text", {
+      x: chartX + maxBarW + 10, y: y + 13,
+      fill: "#f1f5f9", "font-family": "monospace", "font-size": 10.6, "font-weight": 700
+    }, `${k.ms.toFixed(3)} ms`));
+
+    svgB.appendChild(el("text", {
+      x: W2 - 6, y: y + 13, "text-anchor": "end",
+      fill: "#94a3b8", "font-family": "monospace", "font-size": 9.8
+    }, `${k.pct.toFixed(1)}%`));
+  });
+
+  wrapB.innerHTML = "";
+  wrapB.appendChild(svgB);
+}
+
+/* ============================================================================
+ * CHART 4: MEMORY BANDWIDTH ROOFLINE (Slide 12)
+ * ============================================================================ */
+function renderRooflineChart() {
+  const wrap = document.getElementById("chart-roofline");
+  const W = 640, H = 415;
+  const pad = { t: 36, r: 28, b: 36, l: 215 };
+  const cw = W - pad.l - pad.r;
+  const maxBW = 660;
+  const xOf = bw => pad.l + (bw / maxBW) * cw;
+
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}` });
+
+  // Vertical gridlines
+  [0, 150, 300, 450, 608].forEach(v => {
+    const x = xOf(v);
+    const isPeak = v === 608;
+    svg.appendChild(el("line", {
+      x1: x, y1: pad.t - 8, x2: x, y2: H - pad.b,
+      stroke: isPeak ? "#fbbf24" : "#1b2842",
+      "stroke-width": isPeak ? 2 : 1,
+      "stroke-dasharray": isPeak ? "6 4" : ""
+    }));
+    svg.appendChild(el("text", {
+      x, y: isPeak ? pad.t - 14 : H - pad.b + 18, "text-anchor": "middle",
+      fill: isPeak ? "#fbbf24" : "#64748b", "font-family": "monospace", "font-size": isPeak ? 11 : 10, "font-weight": isPeak ? 700 : 400
+    }, isPeak ? "608 GB/s B70 Peak" : `${v}`));
+  });
+  svg.appendChild(el("text", { x: xOf(608), y: H - pad.b + 18, "text-anchor": "middle", fill: "#fbbf24", "font-family": "monospace", "font-size": 10, "font-weight": 700 }, "608"));
+
+  const rowH = (H - pad.t - pad.b) / METRICS.roofline.length;
+  METRICS.roofline.forEach((d, i) => {
+    const y = pad.t + i * rowH + 6;
+    const bh = 26;
+
+    svg.appendChild(el("text", {
+      x: pad.l - 10, y: y + 17, "text-anchor": "end",
+      fill: d.val > 500 ? "#34d399" : d.isRange ? "#fda4af" : "#e2e8f0",
+      "font-family": "monospace", "font-size": 10.8, "font-weight": d.val > 500 || d.isRange ? 700 : 500
+    }, d.name));
+
+    if (d.isRange) {
+      // Range bar 62..178 GB/s
+      const x1 = xOf(0), xLow = xOf(d.low), xHigh = xOf(d.high);
+      svg.appendChild(el("rect", { x: x1, y, width: xLow - x1, height: bh, rx: 3, fill: "rgba(244,63,94,0.35)" }));
+      const rBar = el("rect", { x: xLow, y, width: xHigh - xLow, height: bh, rx: 4, fill: d.color });
+      bindTooltip(rBar, `${d.name}: ${d.low}–${d.high} GB/s`, `Only 10.2%–29.3% of B70 peak. ${d.tag}`);
+      svg.appendChild(rBar);
+      svg.appendChild(el("text", { x: xHigh + 8, y: y + 17, fill: "#fb7185", "font-family": "monospace", "font-size": 10.5, "font-weight": 700 }, `${d.low}–${d.high} GB/s · ${d.tag}`));
+    } else {
+      const w = xOf(d.val) - pad.l;
+      const bar = el("rect", { x: pad.l, y, width: w, height: bh, rx: 4, fill: d.color });
+      bindTooltip(bar, `${d.name}: ${d.val} GB/s`, `${((d.val / 608) * 100).toFixed(1)}% of 608 GB/s GDDR6 peak. ${d.tag}`);
+      svg.appendChild(bar);
+
+      const inside = d.val >= 380;
+      svg.appendChild(el("text", {
+        x: inside ? pad.l + w - 8 : pad.l + w + 8,
+        y: y + 17,
+        "text-anchor": inside ? "end" : "start",
+        fill: inside ? "#060c18" : "#f1f5f9",
+        "font-family": "monospace", "font-size": 10.5, "font-weight": 800
+      }, `${d.val} GB/s`));
+
+      svg.appendChild(el("text", {
+        x: inside ? pad.l + 8 : pad.l + w + 76,
+        y: y + 17,
+        fill: inside ? "#060c18" : "#94a3b8",
+        "font-family": "monospace", "font-size": 9.8, "font-weight": inside ? 700 : 500
+      }, d.tag));
+    }
+  });
+
+  wrap.innerHTML = "";
+  wrap.appendChild(svg);
+}
+
+/* ============================================================================
+ * PASS 6 DECODE CONTEXT SCALING CARD (Slide 14) + LONG-CONTEXT CHART (Slide 15)
+ * ============================================================================ */
+function renderPass6Slot() {
+  const p6 = METRICS.pass6;
+  const slot = document.getElementById("p6-metrics-slot");
+  if (!slot) return;
+  slot.innerHTML = `
+    <div class="card-title">Pass 6 Bit-Exact Decode Scaling <span class="badge cyan">CTX = 262,144</span></div>
+    <div class="spec-grid" style="margin-bottom:8px;">
+      <div class="spec-item"><span class="k">p8 (64 tok · equal=YES)</span><span class="v c-emerald">${p6.decodeShortTokS} tok/s</span></div>
+      <div class="spec-item"><span class="k">fib (64 tok · equal=YES)</span><span class="v c-emerald">${p6.decodeFibTokS} tok/s</span></div>
+      <div class="spec-item"><span class="k">256 / 512 Context</span><span class="v c-cyan">${p6.decode256TokS} / ${p6.decode512TokS}</span></div>
+      <div class="spec-item"><span class="k">4K / 14.6K Context</span><span class="v c-cyan">${p6.decode4kTokS} / ${p6.decode14kTokS}</span></div>
+      <div class="spec-item"><span class="k">32K / 64K Context</span><span class="v c-amber">${p6.decode32kTokS} / ${p6.decode64kTokS}</span></div>
+      <div class="spec-item"><span class="k">128K Context</span><span class="v c-amber">${p6.decode128kTokS} tok/s</span></div>
+    </div>
+    <div class="callout emerald" style="margin-top:auto; padding:8px 12px; font-size:11.8px;">
+      <strong>Bit-exact SHAs:</strong> <code>p8=${p6.shaP8}</code> · <code>fib=${p6.shaFib}</code> — 64K prefill in <strong>1.40 min (7.2× Vulkan)</strong>, 128K in <strong>3.17 min</strong>!
+    </div>`;
+}
+
+function renderLongCtxChart() {
+  const wrap = document.getElementById("chart-longctx");
+  if (!wrap) return;
+  const W = 610, H = 375;
+  const pad = { t: 36, r: 46, b: 48, l: 48 };
+  const cw = W - pad.l - pad.r;
+  const ch = H - pad.t - pad.b;
+  const maxPre = 1040;
+  const maxDec = 100;
+  const yPre = v => pad.t + ch - (v / maxPre) * ch;
+  const yDec = v => pad.t + ch - (v / maxDec) * ch;
+
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}` });
+
+  // Horizontal gridlines (left axis: Prefill tok/s)
+  [0, 200, 400, 600, 800, 1000].forEach(v => {
+    const y = yPre(v);
+    svg.appendChild(el("line", { x1: pad.l, y1: y, x2: W - pad.r, y2: y, stroke: "#1b2842", "stroke-width": 1 }));
+    svg.appendChild(el("text", { x: pad.l - 8, y: y + 4, "text-anchor": "end", fill: "#34d399", "font-family": "monospace", "font-size": 10 }, `${v}`));
+  });
+  // Right axis labels (Decode tok/s)
+  [0, 25, 50, 75, 100].forEach(v => {
+    const y = yDec(v);
+    svg.appendChild(el("text", { x: W - pad.r + 8, y: y + 4, fill: "#fbbf24", "font-family": "monospace", "font-size": 10 }, `${v}`));
+  });
+
+  // Axis headers
+  svg.appendChild(el("text", { x: pad.l, y: 16, fill: "#34d399", "font-family": "monospace", "font-size": 10, "font-weight": 700 }, "■ Prefill (tok/s)"));
+  svg.appendChild(el("text", { x: W - pad.r, y: 16, "text-anchor": "end", fill: "#fbbf24", "font-family": "monospace", "font-size": 10, "font-weight": 700 }, "● Decode (tok/s)"));
+
+  const data = METRICS.longContext;
+  const step = cw / data.length;
+  const bw = step * 0.56;
+  const decPts = [];
+
+  data.forEach((d, i) => {
+    const cx = pad.l + i * step + step / 2;
+    const x = cx - bw / 2;
+    const y = yPre(d.prefillTokS);
+    const h = yPre(0) - y;
+    const fill = d.tokens >= 65536 ? "#00d4ff" : "#10b981";
+
+    const bar = el("rect", { x, y, width: bw, height: h, rx: 4, fill, opacity: "0.86" });
+    bindTooltip(bar, `${d.label} tokens (${d.tokens.toLocaleString()})`, `Prefill: ${d.prefillTokS} tok/s (${d.prefillSec} s / ${d.timeLbl}) · Decode: ${d.decodeTokS} tok/s`);
+    svg.appendChild(bar);
+
+    // Prefill value & wall time above bar
+    svg.appendChild(el("text", { x: cx, y: y - 14, "text-anchor": "middle", fill: "#f1f5f9", "font-family": "monospace", "font-size": 9.5, "font-weight": 700 }, `${Math.round(d.prefillTokS)}`));
+    svg.appendChild(el("text", { x: cx, y: y - 4, "text-anchor": "middle", fill: "#94a3b8", "font-family": "monospace", "font-size": 8.5 }, d.timeLbl));
+
+    // X-axis label
+    svg.appendChild(el("text", {
+      x: cx, y: H - pad.b + 18, "text-anchor": "middle",
+      fill: d.tokens >= 65536 ? "#00d4ff" : "#cbd5e1",
+      "font-family": "monospace", "font-size": 10, "font-weight": d.tokens >= 32768 ? 700 : 500
+    }, d.label));
+
+    decPts.push({ cx, cy: yDec(d.decodeTokS), d });
+  });
+
+  // Decode polyline
+  svg.appendChild(el("polyline", {
+    points: decPts.map(p => `${p.cx},${p.cy}`).join(" "),
+    fill: "none", stroke: "#fbbf24", "stroke-width": 2.4
+  }));
+
+  // Decode dots + labels
+  decPts.forEach((p, idx) => {
+    const dot = el("circle", { cx: p.cx, cy: p.cy, r: 4.5, fill: "#fbbf24", stroke: "#0a101d", "stroke-width": 1.6 });
+    bindTooltip(dot, `Decode @ ${p.d.label}: ${p.d.decodeTokS} tok/s`, `After ${p.d.tokens.toLocaleString()}-token prefill (${p.d.timeLbl})`);
+    svg.appendChild(dot);
+
+    // Put decode numeric badge cleanly next to key points (avoid overlapping prefill text)
+    if (idx === 0 || idx === 3 || idx === 5 || idx === 6 || idx === 7 || idx === 8) {
+      svg.appendChild(el("text", {
+        x: p.cx, y: p.cy + 15, "text-anchor": "middle",
+        fill: "#fde68a", "font-family": "monospace", "font-size": 9.2, "font-weight": 700
+      }, p.d.decodeTokS.toFixed(1)));
+    }
+  });
+
+  wrap.innerHTML = "";
+  wrap.appendChild(svg);
+}
+
+/* ============================================================================
+ * CHART 6: PASS 8 NATIVE Xe2 XMX VISION LATENCY SWEEP (Slide 17)
+ * ============================================================================ */
+function renderVisionChart() {
+  const wrap = document.getElementById("chart-vision");
+  if (!wrap) return;
+  const W = 640, H = 228;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}` });
+  const lblW = 132, barX = 140, maxBarW = 285, maxMs = 2150;
+
+  // Legend
+  svg.appendChild(el("rect", { x: barX, y: 4, width: 10, height: 10, rx: 2, fill: "#a78bfa" }));
+  svg.appendChild(el("text", { x: barX + 15, y: 13, fill: "#c4b5fd", "font-family": "monospace", "font-size": 9.8, "font-weight": 700 }, "ViT Encode (XMX)"));
+  svg.appendChild(el("rect", { x: barX + 135, y: 4, width: 10, height: 10, rx: 2, fill: "#00d4ff" }));
+  svg.appendChild(el("text", { x: barX + 150, y: 13, fill: "#bae6fd", "font-family": "monospace", "font-size": 9.8, "font-weight": 700 }, "LLM Prefill"));
+  svg.appendChild(el("text", { x: W - 6, y: 13, "text-anchor": "end", fill: "#64748b", "font-family": "monospace", "font-size": 9.5 }, "ViT ms  ·  LLM ms  ·  Decode"));
+
+  // Subtle vertical scale lines
+  [0, 500, 1000, 1500, 2000].forEach(v => {
+    const x = barX + (v / maxMs) * maxBarW;
+    svg.appendChild(el("line", { x1: x, y1: 22, x2: x, y2: H - 22, stroke: "#1b2842", "stroke-width": 1 }));
+    svg.appendChild(el("text", { x, y: H - 7, "text-anchor": "middle", fill: "#64748b", "font-family": "monospace", "font-size": 9.2 }, v === 0 ? "0ms" : `${v}ms`));
+  });
+
+  METRICS.pass8Vision.resolutionSweep.forEach((d, i) => {
+    const y = 30 + i * 35;
+    const vitW = Math.max(5, (d.vitMs / maxMs) * maxBarW);
+    const llmW = Math.max(10, (d.llmMs / maxMs) * maxBarW);
+
+    svg.appendChild(el("text", {
+      x: lblW, y: y + 11, "text-anchor": "end",
+      fill: d.res === "640×640" || d.res === "1920×1080" ? "#f1f5f9" : "#cbd5e1",
+      "font-family": "monospace", "font-size": 10.5, "font-weight": 700
+    }, d.res));
+    svg.appendChild(el("text", {
+      x: lblW, y: y + 23, "text-anchor": "end",
+      fill: "#64748b", "font-family": "monospace", "font-size": 9
+    }, `${d.tokens.toLocaleString()} img tok`));
+
+    // Track background
+    svg.appendChild(el("rect", { x: barX, y: y + 2, width: maxBarW, height: 21, rx: 4, fill: "#070c18" }));
+
+    // ViT bar
+    const rVit = el("rect", { x: barX, y: y + 2, width: vitW, height: 21, rx: 3, fill: "#a78bfa" });
+    bindTooltip(rVit, `${d.res} ViT Encode: ${d.vitMs} ms`, `${d.tokens} img tokens · LLM prefill ${d.llmMs} ms · Decode ${d.decodeTokS} tok/s. ${d.note}`);
+    svg.appendChild(rVit);
+
+    // LLM prefill bar immediately after ViT
+    const rLlm = el("rect", { x: barX + vitW + 1, y: y + 2, width: llmW, height: 21, rx: 3, fill: "#00d4ff", opacity: "0.82" });
+    bindTooltip(rLlm, `${d.res} LLM Prefill: ${d.llmMs} ms`, `Total TTFT ≈ ${(d.vitMs + d.llmMs).toFixed(1)} ms · Decode ${d.decodeTokS} tok/s. ${d.note}`);
+    svg.appendChild(rLlm);
+
+    // Right tabular metrics
+    const rx = barX + maxBarW + 12;
+    svg.appendChild(el("text", { x: rx, y: y + 16, fill: "#c4b5fd", "font-family": "monospace", "font-size": 10.2, "font-weight": 700 }, `${d.vitMs.toFixed(1)}ms`));
+    svg.appendChild(el("text", { x: rx + 62, y: y + 16, fill: "#38bdf8", "font-family": "monospace", "font-size": 10.2 }, `${d.llmMs.toFixed(0)}ms`));
+    svg.appendChild(el("text", { x: W - 6, y: y + 16, "text-anchor": "end", fill: "#34d399", "font-family": "monospace", "font-size": 10.2, "font-weight": 700 }, `${d.decodeTokS} t/s`));
+  });
+
+  wrap.innerHTML = "";
+  wrap.appendChild(svg);
+}
+
+/* ============================================================================
+ * PRESENTATION ENGINE (Scaling, Navigation, Hash Routing, Overview Grid)
+ * ============================================================================ */
+const slides = Array.from(document.querySelectorAll(".slide"));
+const scaler = document.getElementById("deck-scaler");
+const hudCounter = document.getElementById("hud-counter");
+const progressFill = document.getElementById("progress-fill");
+const overview = document.getElementById("overview");
+const ovGrid = document.getElementById("ov-grid");
+let current = 0;
+
+function fitStage() {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const scale = Math.min((vw - 24) / 1280, (vh - 24) / 720, 1.5);
+  scaler.style.transform = `scale(${Math.max(0.25, scale)})`;
+}
+
+function goTo(idx, updateHash = true) {
+  current = Math.max(0, Math.min(slides.length - 1, idx));
+  slides.forEach((s, i) => s.classList.toggle("active", i === current));
+  hudCounter.textContent = `${current + 1} / ${slides.length}`;
+  progressFill.style.width = `${((current + 1) / slides.length) * 100}%`;
+  if (updateHash) history.replaceState(null, "", `#slide-${current + 1}`);
+  refreshOverviewHighlight();
+}
+
+function buildOverview() {
+  ovGrid.innerHTML = "";
+  slides.forEach((s, i) => {
+    const card = document.createElement("div");
+    card.className = "ov-card";
+    card.dataset.idx = i;
+    card.innerHTML = `
+      <div class="ov-num">SLIDE ${String(i + 1).padStart(2, "0")}</div>
+      <div class="ov-title">${s.dataset.title || `Slide ${i + 1}`}</div>
+      <div class="ov-sub">${s.dataset.sub || ""}</div>`;
+    card.addEventListener("click", () => {
+      toggleOverview(false);
+      goTo(i);
+    });
+    ovGrid.appendChild(card);
+  });
+}
+
+function refreshOverviewHighlight() {
+  ovGrid.querySelectorAll(".ov-card").forEach((c, i) => c.classList.toggle("current", i === current));
+}
+
+function toggleOverview(force) {
+  const open = typeof force === "boolean" ? force : !overview.classList.contains("open");
+  overview.classList.toggle("open", open);
+  refreshOverviewHighlight();
+}
+
+function toggleFullscreen() {
+  if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+  else document.exitFullscreen?.();
+}
+
+// Keyboard controls
+window.addEventListener("keydown", (e) => {
+  if (e.key === "g" || e.key === "G") { e.preventDefault(); toggleOverview(); return; }
+  if (e.key === "Escape") { if (overview.classList.contains("open")) { e.preventDefault(); toggleOverview(false); } return; }
+  if (overview.classList.contains("open")) return;
+  if (e.key === "ArrowRight" || e.key === "ArrowDown" || e.key === " " || e.key === "PageDown") { e.preventDefault(); goTo(current + 1); }
+  else if (e.key === "ArrowLeft" || e.key === "ArrowUp" || e.key === "PageUp") { e.preventDefault(); goTo(current - 1); }
+  else if (e.key === "Home") { e.preventDefault(); goTo(0); }
+  else if (e.key === "End") { e.preventDefault(); goTo(slides.length - 1); }
+  else if (e.key === "f" || e.key === "F") { e.preventDefault(); toggleFullscreen(); }
+});
+
+// Button controls
+document.getElementById("btn-prev").addEventListener("click", () => goTo(current - 1));
+document.getElementById("btn-next").addEventListener("click", () => goTo(current + 1));
+document.getElementById("btn-grid").addEventListener("click", () => toggleOverview());
+document.getElementById("btn-fs").addEventListener("click", () => toggleFullscreen());
+document.getElementById("btn-ov-close").addEventListener("click", () => toggleOverview(false));
+
+// Touch swipe support
+let touchStartX = null;
+window.addEventListener("touchstart", (e) => { touchStartX = e.changedTouches[0].clientX; }, { passive: true });
+window.addEventListener("touchend", (e) => {
+  if (touchStartX === null || overview.classList.contains("open")) return;
+  const dx = e.changedTouches[0].clientX - touchStartX;
+  if (Math.abs(dx) > 48) goTo(current + (dx < 0 ? 1 : -1));
+  touchStartX = null;
+}, { passive: true });
+
+// Hash change support
+window.addEventListener("hashchange", () => {
+  const m = location.hash.match(/^#slide-(\d+)$/);
+  if (m) goTo(parseInt(m[1], 10) - 1, false);
+});
+
+window.addEventListener("resize", fitStage);
+
+// Initialize everything
+renderHero();
+renderDecodeChart();
+renderPrefillChart();
+renderKernelCharts();
+renderRooflineChart();
+renderPass6Slot();
+renderLongCtxChart();
+renderVisionChart();
+buildOverview();
+fitStage();
+
+const initMatch = location.hash.match(/^#slide-(\d+)$/);
+goTo(initMatch ? parseInt(initMatch[1], 10) - 1 : 0, false);
+</script>
+</body>
+</html>

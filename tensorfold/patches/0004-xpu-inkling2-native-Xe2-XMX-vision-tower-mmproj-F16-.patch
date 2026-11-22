@@ -1,0 +1,1074 @@
+From f1b1eac47b3166c263c801614e326e17660eab39 Mon Sep 17 00:00:00 2001
+From: Marc Aldrich <7917445+MarcAldrich@users.noreply.github.com>
+Date: Sun, 22 Nov 2026 00:03:41 -0600
+Subject: [PATCH 4/4] xpu-inkling2: native Xe2 XMX vision tower (mmproj-F16
+ inkling2v)
+
+Add end-to-end multimodal image support for Inkling-2-Mini (mmproj-F16.gguf / inkling2v):
+- vit.cl: Xe2 XMX DPAS F16 GEMM, bilinear 32x32 pos-emb + CLS, LayerNorm, 2D RoPE (GGML normal),
+  bidirectional Xe2 XMX FlashAttention, LayerScale residual, and 2x2 spatial patch merge (0 spills).
+- xpu_vit.zig: GGUF mmproj loader and GPU ViT encoder (+0.79 GB VRAM incl. 16K-token image pool).
+- ink2.cl / xpu_main.zig: ink2_embed_mix_b (injects projected image embeddings raw without embed_norm)
+  and --serve img protocol with prefix-cache compatibility across multi-turn image conversations.
+- inkling2_serve.py: --mmproj flag, OpenAI image_url preprocessing (exact inkling2v align=40/-1 pad),
+  SHA256 GPU image cache, and HTTP 400 guard when --mmproj is not loaded.
+---
+ tools/xpu/inkling2_serve.py            | 143 +++++++++-
+ zig/build/xpu_inkling2.zig             |  11 +-
+ zig/kernels/xpu/inkling2/ink2.cl       |  24 ++
+ zig/kernels/xpu/inkling2/vit.cl        | 353 +++++++++++++++++++++++++
+ zig/src/families/inkling2/xpu_main.zig |  81 +++++-
+ zig/src/families/inkling2/xpu_vit.zig  | 199 ++++++++++++++
+ 6 files changed, 792 insertions(+), 19 deletions(-)
+ create mode 100644 zig/kernels/xpu/inkling2/vit.cl
+ create mode 100644 zig/src/families/inkling2/xpu_vit.zig
+
+diff --git a/tools/xpu/inkling2_serve.py b/tools/xpu/inkling2_serve.py
+index 49f02079..0497427a 100644
+--- a/tools/xpu/inkling2_serve.py
++++ b/tools/xpu/inkling2_serve.py
+@@ -8,18 +8,86 @@ generation_config) and seed; top_p must be 1 and penalties 0, anything else is r
+ `reasoning_content`, the answer as `content`, split on <|content_thinking|> and <|content_text|>.
+ """
+ import argparse
++import base64
++import hashlib
++import io
+ import json
++import math
+ import os
+ import random
+ import subprocess
++import tempfile
+ import threading
+ import time
++import urllib.request
+ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+ 
+ from transformers import PreTrainedTokenizerFast
+ 
+ MESSAGE_MODEL, CONTENT_TEXT, EOS, CONTENT_THINKING, END_MESSAGE = 200001, 200004, 200006, 200008, 200010
+-CONTENT_TOOL_JSON, CONTENT_TOOL_TEXT = 200049, 200057
++CONTENT_TOOL_JSON, CONTENT_TOOL_TEXT, IMAGE_TOKEN = 200049, 200057, 200054
++IMG_ID_BASE = 0x80000000
++
++
++def load_image_bytes(part):
++    """Fetch raw image bytes from an OpenAI image_url / image / input_image content part."""
++    url = part.get("image_url") or part.get("image") or part.get("url")
++    if isinstance(url, dict):
++        url = url.get("url", "")
++    if not isinstance(url, str) or not url:
++        raise ValueError("missing image_url")
++    if url.startswith("data:"):
++        _, b64 = url.split(",", 1)
++        return base64.b64decode(b64)
++    if url.startswith(("http://", "https://")):
++        with urllib.request.urlopen(url, timeout=30) as r:
++            return r.read()
++    if url.startswith("file://"):
++        url = url[7:]
++    return open(url, "rb").read()
++
++
++def preprocess_inkling2v(raw_bytes):
++    """Preprocess image identically to mtmd_image_preprocessor_inkling2v -> (wp, hp, float32 patches [wp*hp, 1200])."""
++    import numpy as np
++    from PIL import Image
++
++    im = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
++    w, h = im.size
++    align = 40
++    max_pixels = 4096 * align * align
++    aw = ((w + align - 1) // align) * align
++    ah = ((h + align - 1) // align) * align
++    if aw * ah > max_pixels:
++        scale = math.sqrt(max_pixels / float(w * h))
++        nw = max(align, int(w * scale))
++        nh = max(align, int(h * scale))
++        while (((nw + align - 1) // align) * align) * (((nh + align - 1) // align) * align) > max_pixels:
++            nw = max(align, nw - align)
++            nh = max(align, nh - align)
++        im = im.resize((nw, nh), Image.Resampling.LANCZOS)
++        w, h = im.size
++        aw = ((w + align - 1) // align) * align
++        ah = ((h + align - 1) // align) * align
++    arr = np.full((ah, aw, 3), -1.0, dtype=np.float32)
++    arr[:h, :w, :] = np.asarray(im, dtype=np.float32)
++    arr = (arr - 127.5) / 127.5
++    wp, hp = aw // 20, ah // 20
++    # [hp, 20, wp, 20, 3] -> [hp, wp, 3, 20, 20] -> [wp*hp, 1200]
++    patches = arr.reshape(hp, 20, wp, 20, 3).transpose(0, 2, 4, 1, 3).reshape(wp * hp, 1200)
++    return wp, hp, np.ascontiguousarray(patches, dtype=np.float32)
++
++
++def extract_image_parts(messages):
++    """Collect all image content parts in template order (user and tool messages)."""
++    parts = []
++    for m in messages:
++        c = m.get("content")
++        if isinstance(c, list):
++            for part in c:
++                if isinstance(part, dict) and part.get("type") in ("image", "input_image", "image_url"):
++                    parts.append(part)
++    return parts
+ 
+ 
+ def normalize_messages(messages):
+@@ -46,13 +114,48 @@ def normalize_messages(messages):
+ 
+ 
+ class Runner:
+-    def __init__(self, binary, model, ctx):
+-        self.p = subprocess.Popen([binary, model, "--serve", str(ctx)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
++    def __init__(self, binary, model, ctx, mmproj=None):
++        cmd = [binary, model, "--serve", str(ctx)]
++        if mmproj:
++            cmd += ["--mmproj", mmproj]
++        self.has_vision = bool(mmproj)
++        self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   text=True, bufsize=1)
+         line = self.p.stdout.readline()
+         if line.strip() != "ready":
+             raise SystemExit("runner did not start: " + line)
+         self.lock = threading.Lock()
++        self.img_cache = {}
++
++    def encode_image(self, raw_bytes):
++        """Encode image bytes on GPU via runner (cached by SHA256); returns (offset, n_img, enc_ms)."""
++        key = hashlib.sha256(raw_bytes).hexdigest()
++        if key in self.img_cache:
++            off_i, n_img = self.img_cache[key]
++            return off_i, n_img, 0.0
++        wp, hp, patches = preprocess_inkling2v(raw_bytes)
++        fd, tmp = tempfile.mkstemp(prefix="ink2_img_", suffix=".f32")
++        try:
++            with os.fdopen(fd, "wb") as f:
++                f.write(patches.tobytes())
++            self.p.stdin.write(f"img {wp} {hp} {tmp}\n")
++            self.p.stdin.flush()
++            line = self.p.stdout.readline()
++            if not line:
++                raise RuntimeError("runner exited during image encode")
++            w = line.split()
++            if w[0] != "i":
++                raise RuntimeError("runner image error: " + line.strip())
++            off_i, n_img, enc_ms, wrapped = int(w[1]), int(w[2]), float(w[3]), int(w[4])
++            if wrapped:
++                self.img_cache.clear()
++            self.img_cache[key] = (off_i, n_img)
++            return off_i, n_img, enc_ms
++        finally:
++            try:
++                os.unlink(tmp)
++            except OSError:
++                pass
+ 
+     def generate(self, ids, max_new, temp, seed):
+         """Yields ("t", id) per token, then ("e", prompt_n, gen_n, prefill_s, decode_s)."""
+@@ -184,6 +287,15 @@ def make_handler(args, runner, tok, template):
+             if body.get("tools"):
+                 kw["tools"] = body["tools"]
+             msgs = normalize_messages(body["messages"])
++            img_parts = extract_image_parts(msgs)
++            if img_parts and not runner.has_vision:
++                return self.reply(400, {"error": "image inputs require --mmproj"})
++            raw_images = []
++            try:
++                for part in img_parts:
++                    raw_images.append(load_image_bytes(part))
++            except Exception as ex:
++                return self.reply(400, {"error": f"failed to load image: {ex}"})
+             text = tok.apply_chat_template(msgs, chat_template=template, add_generation_prompt=True,
+                                            tokenize=False, **kw)
+             ids = tok.encode(text, add_special_tokens=False)
+@@ -195,6 +307,25 @@ def make_handler(args, runner, tok, template):
+             split = Splitter(tok)
+             with runner.lock:
+                 t0 = time.monotonic()
++                vision_ms = 0.0
++                image_tokens = 0
++                if raw_images:
++                    encoded = []
++                    for raw_b in raw_images:
++                        off_i, n_img, enc_ms = runner.encode_image(raw_b)
++                        vision_ms += enc_ms
++                        image_tokens += n_img
++                        encoded.append((off_i, n_img))
++                    expanded = []
++                    img_idx = 0
++                    for tid in ids:
++                        if tid == IMAGE_TOKEN and img_idx < len(encoded):
++                            off_i, n_img = encoded[img_idx]
++                            img_idx += 1
++                            expanded.extend(IMG_ID_BASE + off_i + k for k in range(n_img))
++                        else:
++                            expanded.append(tid)
++                    ids = expanded
+                 if stream:
+                     self.send_response(200)
+                     self.send_header("Content-Type", "text/event-stream")
+@@ -225,6 +356,9 @@ def make_handler(args, runner, tok, template):
+                 timings = {"prompt_n": pn, "prompt_ms": ps * 1e3, "predicted_n": gn, "predicted_ms": ds * 1e3,
+                            "predicted_per_second": (gn - 1) / ds if ds > 0 and gn > 1 else None,
+                            "wall_ms": (time.monotonic() - t0) * 1e3}
++                if raw_images:
++                    timings["vision_ms"] = vision_ms
++                    timings["image_tokens"] = image_tokens
+                 if last == EOS:
+                     finish = "tool_calls" if split.tool_calls else "stop"
+                 else:
+@@ -258,6 +392,7 @@ def main():
+     ap = argparse.ArgumentParser()
+     ap.add_argument("--runner", required=True)
+     ap.add_argument("--model", required=True)
++    ap.add_argument("--mmproj", default=None)
+     ap.add_argument("--meta", required=True)
+     ap.add_argument("--host", default="127.0.0.1")
+     ap.add_argument("--port", type=int, required=True)
+@@ -266,7 +401,7 @@ def main():
+     args = ap.parse_args()
+     tok = PreTrainedTokenizerFast(tokenizer_file=os.path.join(args.meta, "tokenizer.json"))
+     template = open(os.path.join(args.meta, "chat_template.jinja")).read()
+-    runner = Runner(args.runner, args.model, args.ctx)
++    runner = Runner(args.runner, args.model, args.ctx, args.mmproj)
+     srv = ThreadingHTTPServer((args.host, args.port), make_handler(args, runner, tok, template))
+     print(f"listening on {args.host}:{args.port}", flush=True)
+     srv.serve_forever()
+diff --git a/zig/build/xpu_inkling2.zig b/zig/build/xpu_inkling2.zig
+index f2eb43b7..99c349f8 100644
+--- a/zig/build/xpu_inkling2.zig
++++ b/zig/build/xpu_inkling2.zig
+@@ -5,16 +5,21 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
+     const ocloc = b.option([]const u8, "ink2-ocloc", "Intel offline compiler for the Inkling 2 XPU kernels") orelse "ocloc";
+     const files = b.addWriteFiles();
+     // the same source twice: 128 registers a thread (the default, twice the resident threads) and 256 (INK2_GRF=256)
+-    for ([_][2][]const u8{ .{ "ink2", "-cl-std=CL3.0" }, .{ "ink2_256", "-cl-std=CL3.0 -cl-intel-256-GRF-per-thread" } }) |v| {
++    for ([_][3][]const u8{
++        .{ "ink2", "zig/kernels/xpu/inkling2/ink2.cl", "-cl-std=CL3.0" },
++        .{ "ink2_256", "zig/kernels/xpu/inkling2/ink2.cl", "-cl-std=CL3.0 -cl-intel-256-GRF-per-thread" },
++        .{ "vit", "zig/kernels/xpu/inkling2/vit.cl", "-cl-std=CL3.0" },
++    }) |v| {
+         const c = b.addSystemCommand(&.{ ocloc, "compile", "-q", "-file" });
+-        c.addFileArg(b.path("zig/kernels/xpu/inkling2/ink2.cl"));
+-        c.addArgs(&.{ "-device", "bmg", "-options", v[1], "-output_no_suffix", "-output", v[0], "-out_dir" });
++        c.addFileArg(b.path(v[1]));
++        c.addArgs(&.{ "-device", "bmg", "-options", v[2], "-output_no_suffix", "-output", v[0], "-out_dir" });
+         const dir = c.addOutputDirectoryArg(b.fmt("ocloc-{s}", .{v[0]}));
+         _ = files.addCopyFile(dir.path(b, b.fmt("{s}.bin", .{v[0]})), b.fmt("{s}.bin", .{v[0]}));
+     }
+     const kernels = b.createModule(.{ .root_source_file = files.add("xpu_inkling2_kernels.zig",
+         \\pub const ink2 align(8) = @embedFile("ink2.bin").*;
+         \\pub const ink2_256 align(8) = @embedFile("ink2_256.bin").*;
++        \\pub const vit align(8) = @embedFile("vit.bin").*;
+         \\
+     ) });
+     const ze = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/ze.zig"), .target = target, .optimize = optimize, .link_libc = true });
+diff --git a/zig/kernels/xpu/inkling2/ink2.cl b/zig/kernels/xpu/inkling2/ink2.cl
+index 2edeea55..9fe60c02 100644
+--- a/zig/kernels/xpu/inkling2/ink2.cl
++++ b/zig/kernels/xpu/inkling2/ink2.cl
+@@ -1328,6 +1328,30 @@ KERNEL(256) void ink2_embed_b(global const char *q, global const half *s, global
+   for (int i = 0; i < 9; i++) out[(long)row * C + t + i * 256] = v[i] * r * gamma[t + i * 256];
+ }
+ 
++// Mixed text/image prompt embed: tok >= 0 uses Q8_0 + embed_norm; tok < 0 copies img_embd[tok & 0x7fffffff] raw.
++KERNEL(256) void ink2_embed_mix_b(global const char *q, global const half *s, global const int *ids,
++                                  global const float *gamma, float eps, global const float *img_embd,
++                                  global float *out) {
++  local float red[16];
++  const int t = get_local_id(0), row = get_group_id(0), tok = ids[row];
++  if (tok < 0) {
++    const long idx = (long)(tok & 0x7fffffff);
++    for (int i = 0; i < 9; i++) {
++      const int c = t + i * 256;
++      out[(long)row * C + c] = img_embd[idx * C + c];
++    }
++    return;
++  }
++  float v[9], ss = 0.0f;
++  for (int i = 0; i < 9; i++) {
++    const int c = t + i * 256;
++    v[i] = (float)q[(long)tok * C + c] * (float)s[(long)tok * (C / 32) + c / 32];
++    ss += v[i] * v[i];
++  }
++  const float r = rsqrt(wg_sum(ss, red) / C + eps);
++  for (int i = 0; i < 9; i++) out[(long)row * C + t + i * 256] = v[i] * r * gamma[t + i * 256];
++}
++
+ // mix3 a row a work-group (grid T); states S[slot][TMAX][C]; out[i][TMAX][C].
+ KERNEL(512) void ink2_mix3_b(global const float *S, Slots sl, global const float *q1, int n1, global const float *q2,
+                              int n2, global const float *q3, int n3, global float *out) {
+diff --git a/zig/kernels/xpu/inkling2/vit.cl b/zig/kernels/xpu/inkling2/vit.cl
+new file mode 100644
+index 00000000..5ac77815
+--- /dev/null
++++ b/zig/kernels/xpu/inkling2/vit.cl
+@@ -0,0 +1,353 @@
++// Inkling 2 Mini vision tower (inkling2v, 23-layer ViT + 2x2 merge + 2-layer GELU MLP) on Intel Xe2 XMX.
++#pragma OPENCL EXTENSION cl_khr_fp16 : enable
++#pragma OPENCL FP_CONTRACT OFF
++
++#define KERNEL(N) __attribute__((intel_reqd_sub_group_size(16))) __attribute__((reqd_work_group_size(N, 1, 1))) kernel
++#define VD 1024
++#define VNH 16
++#define VHD 64
++
++static inline float gelu_erf(float x) { return 0.5f * x * (1.0f + erf(x * 0.7071067811865475f)); }
++
++static float wg_sum256(float v, local float *red) {
++  const float s = sub_group_reduce_add(v);
++  if (get_sub_group_local_id() == 0) red[get_sub_group_id()] = s;
++  barrier(CLK_LOCAL_MEM_FENCE);
++  float t = 0.0f;
++  for (int i = 0; i < 16; i++) t += red[i];
++  barrier(CLK_LOCAL_MEM_FENCE);
++  return t;
++}
++
++// F16 weight GEMM on Xe2 XMX: Y[M,N] = X[M,K] @ W[N,K]^T + bias, optional GELU_ERF; grid (N/64, (M+15)/16).
++KERNEL(64) void vit_gemm_f16_xmx(global const float *X, global const half *W, global const float *bias,
++                                 global float *Y, int M, int N, int K, int do_gelu) {
++  local short xl[16][16];
++  local uint wl[64][9];
++  const int t = get_local_id(0), lane = get_sub_group_local_id(), sg = get_sub_group_id();
++  const int r_wg = get_group_id(0) * 64, m0 = get_group_id(1) * 16;
++  const int r = r_wg + sg * 16 + lane;
++  const int nm = min(16, M - m0);
++  if (r_wg >= N || nm <= 0) return;
++
++  float8 acc0 = (float8)(0.0f), acc1 = (float8)(0.0f);
++  const int k16_n = K / 16;
++  for (int k16 = 0; k16 < k16_n; k16++) {
++    const int ko = k16 * 16;
++    const int xr = t >> 2, xc = (t & 3) * 4;
++    if (xr < nm) {
++      const short4 hs = as_short4(convert_half4(vload4(0, X + (long)(m0 + xr) * K + ko + xc)));
++      xl[xr][xc + 0] = hs.s0;
++      xl[xr][xc + 1] = hs.s1;
++      xl[xr][xc + 2] = hs.s2;
++      xl[xr][xc + 3] = hs.s3;
++    } else {
++      xl[xr][xc + 0] = 0;
++      xl[xr][xc + 1] = 0;
++      xl[xr][xc + 2] = 0;
++      xl[xr][xc + 3] = 0;
++    }
++    const int wr_l = t >> 3, wc_l = t & 7;
++    for (int rb = 0; rb < 64; rb += 8) {
++      const int wr = rb + wr_l;
++      wl[wr][wc_l] = ((global const uint *)(W + (long)(r_wg + wr) * K + ko))[wc_l];
++    }
++    barrier(CLK_LOCAL_MEM_FENCE);
++
++    const int rr = sg * 16 + lane;
++    short8 a0, a1;
++#pragma unroll
++    for (int m = 0; m < 8; m++) {
++      a0[m] = xl[m][lane];
++      a1[m] = xl[8 + m][lane];
++    }
++    const int8 b = (int8)(wl[rr][0], wl[rr][1], wl[rr][2], wl[rr][3], wl[rr][4], wl[rr][5], wl[rr][6], wl[rr][7]);
++    acc0 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b, acc0);
++    if (nm > 8) acc1 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b, acc1);
++    barrier(CLK_LOCAL_MEM_FENCE);
++  }
++
++  const float bv = bias ? bias[r] : 0.0f;
++  for (int m = 0; m < 8; m++) {
++    if (m < nm) {
++      float v = acc0[m] + bv;
++      if (do_gelu) v = gelu_erf(v);
++      Y[(long)(m0 + m) * N + r] = v;
++    }
++    if (8 + m < nm) {
++      float v = acc1[m] + bv;
++      if (do_gelu) v = gelu_erf(v);
++      Y[(long)(m0 + 8 + m) * N + r] = v;
++    }
++  }
++}
++
++// Prepend CLS+cls_pos at row 0 and add bilinear-resized 32x32 pos_embd to patches; grid N_patches + 1.
++KERNEL(256) void vit_add_pos_cls(global const float *patch, global const float *cls, global const float *cls_pos,
++                                 global const float *pos_embd, int wp, int hp, global float *out) {
++  const int row = get_group_id(0), t = get_local_id(0);
++  if (row == 0) {
++    for (int i = 0; i < 4; i++) {
++      const int c = t + i * 256;
++      out[c] = cls[c] + cls_pos[c];
++    }
++    return;
++  }
++  const int pidx = row - 1;
++  const int py = pidx / wp, px = pidx - py * wp;
++  const float fy = ((float)py + 0.5f) * (32.0f / (float)hp) - 0.5f;
++  const float fx = ((float)px + 0.5f) * (32.0f / (float)wp) - 0.5f;
++  const int y0 = clamp((int)floor(fy), 0, 31), y1 = clamp(y0 + 1, 0, 31);
++  const int x0 = clamp((int)floor(fx), 0, 31), x1 = clamp(x0 + 1, 0, 31);
++  const float dy = clamp(fy - (float)y0, 0.0f, 1.0f);
++  const float dx = clamp(fx - (float)x0, 0.0f, 1.0f);
++  const float w00 = (1.0f - dy) * (1.0f - dx), w01 = (1.0f - dy) * dx;
++  const float w10 = dy * (1.0f - dx), w11 = dy * dx;
++  const long o00 = (long)(y0 * 32 + x0) * VD, o01 = (long)(y0 * 32 + x1) * VD;
++  const long o10 = (long)(y1 * 32 + x0) * VD, o11 = (long)(y1 * 32 + x1) * VD;
++  for (int i = 0; i < 4; i++) {
++    const int c = t + i * 256;
++    const float pe = (wp == 32 && hp == 32)
++                         ? pos_embd[(long)pidx * VD + c]
++                         : (w00 * pos_embd[o00 + c] + w01 * pos_embd[o01 + c] + w10 * pos_embd[o10 + c] +
++                            w11 * pos_embd[o11 + c]);
++    out[(long)row * VD + c] = patch[(long)pidx * VD + c] + pe;
++  }
++}
++
++// Standard LayerNorm on D=1024 (4 floats/thread); grid N_pos.
++KERNEL(256) void vit_ln(global const float *x, global const float *w, global const float *b, float eps,
++                        global float *y) {
++  local float red[16];
++  const int row = get_group_id(0), t = get_local_id(0);
++  global const float *xr = x + (long)row * VD;
++  float v[4], s = 0.0f;
++  for (int i = 0; i < 4; i++) {
++    v[i] = xr[t + i * 256];
++    s += v[i];
++  }
++  const float mean = wg_sum256(s, red) * (1.0f / (float)VD);
++  float vs = 0.0f;
++  for (int i = 0; i < 4; i++) {
++    v[i] -= mean;
++    vs += v[i] * v[i];
++  }
++  const float inv = rsqrt(wg_sum256(vs, red) * (1.0f / (float)VD) + eps);
++  global float *yr = y + (long)row * VD;
++  for (int i = 0; i < 4; i++) {
++    const int c = t + i * 256;
++    yr[c] = v[i] * inv * w[c] + b[c];
++  }
++}
++
++// 2D RoPE (GGML_ROPE_TYPE_NORMAL, theta=10000, d_head=64) in-place on Q and K; grid N_pos.
++KERNEL(256) void vit_rope2d(global float *Q, global float *K, int wp) {
++  const int row = get_group_id(0), t = get_local_id(0);
++  if (row == 0) return;
++  const int pidx = row - 1;
++  const int py = pidx / wp, px = pidx - py * wp;
++  const float pw = (float)(px + 1), ph = (float)(py + 1);
++  const int h = t >> 4, i = t & 15;
++  const float inv_f = pow(10000.0f, -2.0f * (float)i / 32.0f);
++  const float cw = cos(pw * inv_f), sw = sin(pw * inv_f);
++  const float ch = cos(ph * inv_f), sh = sin(ph * inv_f);
++  const long base = (long)row * VD + h * VHD;
++  const int i0 = 2 * i, i1 = 32 + 2 * i;
++  const float q0 = Q[base + i0], q1 = Q[base + i0 + 1];
++  Q[base + i0] = q0 * cw - q1 * sw;
++  Q[base + i0 + 1] = q0 * sw + q1 * cw;
++  const float q2 = Q[base + i1], q3 = Q[base + i1 + 1];
++  Q[base + i1] = q2 * ch - q3 * sh;
++  Q[base + i1 + 1] = q2 * sh + q3 * ch;
++  const float k0 = K[base + i0], k1 = K[base + i0 + 1];
++  K[base + i0] = k0 * cw - k1 * sw;
++  K[base + i0 + 1] = k0 * sw + k1 * cw;
++  const float k2 = K[base + i1], k3 = K[base + i1 + 1];
++  K[base + i1] = k2 * ch - k3 * sh;
++  K[base + i1 + 1] = k2 * sh + k3 * ch;
++}
++
++// Bidirectional FlashAttention on Xe2 XMX DPAS (16 heads, d_head=64, 16 Q/WG, 64 K/tile); grid (16, (N+15)/16).
++KERNEL(128) void vit_attn_xmx(global const float *Q, global const float *K, global const float *V, global float *O,
++                              int N) {
++  local uint ql[4][8][16];
++  local short kv[64][64];
++  local half Pl[16 * 64];
++  local float MX[8 * 16], SM[8 * 16];
++
++  const int h = get_group_id(0), q0 = get_group_id(1) * 16;
++  const int t = get_local_id(0), sg = get_sub_group_id(), lane = get_sub_group_local_id();
++  const int qtok = q0 + lane;
++  const bool qok = qtok < N;
++
++  for (int idx = t; idx < 512; idx += 128) {
++    const int slot = idx & 15, j = idx >> 4;
++    const int tk = q0 + slot;
++    uint val = 0u;
++    if (tk < N) {
++      const float2 q2 = vload2(j, Q + (long)tk * VD + h * VHD) * 0.125f;
++      val = as_uint(convert_half2(q2));
++    }
++    ql[j >> 3][j & 7][slot] = val;
++  }
++  barrier(CLK_LOCAL_MEM_FENCE);
++
++  float mrun = -INFINITY, lrun = 0.0f;
++  float8 orun = (float8)(0.0f);
++  const int q_half = sg >> 2;
++  const int d_blk = (sg & 3) * 16;
++
++  for (int ts = 0; ts < N; ts += 64) {
++    for (int r0 = 0; r0 < 64; r0 += 8) {
++      const int kr = r0 + (t >> 4);
++      const int kc = (t & 15) * 4;
++      if (ts + kr < N) {
++        const short4 hs = as_short4(convert_half4(vload4(0, K + (long)(ts + kr) * VD + h * VHD + kc)));
++        kv[kr][kc + 0] = hs.s0;
++        kv[kr][kc + 1] = hs.s1;
++        kv[kr][kc + 2] = hs.s2;
++        kv[kr][kc + 3] = hs.s3;
++      } else {
++        kv[kr][kc + 0] = 0;
++        kv[kr][kc + 1] = 0;
++        kv[kr][kc + 2] = 0;
++        kv[kr][kc + 3] = 0;
++      }
++    }
++    barrier(CLK_LOCAL_MEM_FENCE);
++
++    float8 s = (float8)(0.0f);
++#pragma unroll
++    for (int ds = 0; ds < 4; ds++) {
++      short8 ka;
++#pragma unroll
++      for (int r = 0; r < 8; r++) ka[r] = kv[sg * 8 + r][ds * 16 + lane];
++      const int8 qb = (int8)(ql[ds][0][lane], ql[ds][1][lane], ql[ds][2][lane], ql[ds][3][lane],
++                             ql[ds][4][lane], ql[ds][5][lane], ql[ds][6][lane], ql[ds][7][lane]);
++      s = intel_sub_group_f16_f16_matrix_mad_k16(ka, qb, s);
++    }
++
++    float mx = -INFINITY;
++#pragma unroll
++    for (int r = 0; r < 8; r++) {
++      const int kk = ts + sg * 8 + r;
++      const float x = (qok && kk < N) ? s[r] : -INFINITY;
++      s[r] = x;
++      mx = fmax(mx, x);
++    }
++    MX[sg * 16 + lane] = mx;
++    barrier(CLK_LOCAL_MEM_FENCE);
++
++    float m = -INFINITY;
++#pragma unroll
++    for (int i = 0; i < 8; i++) m = fmax(m, MX[i * 16 + lane]);
++    float sum = 0.0f;
++#pragma unroll
++    for (int r = 0; r < 8; r++) {
++      const float p = (s[r] == -INFINITY) ? 0.0f : exp(s[r] - m);
++      Pl[lane * 64 + sg * 8 + r] = convert_half(p);
++      sum += p;
++    }
++    SM[sg * 16 + lane] = sum;
++    barrier(CLK_LOCAL_MEM_FENCE);
++
++    float l = 0.0f;
++#pragma unroll
++    for (int i = 0; i < 8; i++) l += SM[i * 16 + lane];
++
++    float fa = 1.0f, fb = 0.0f;
++    if (qok && m > -INFINITY) {
++      if (mrun == -INFINITY) {
++        fa = 0.0f;
++        fb = 1.0f;
++        mrun = m;
++        lrun = l;
++      } else {
++        const float mm = fmax(mrun, m);
++        fa = exp(mrun - mm);
++        fb = exp(m - mm);
++        lrun = lrun * fa + l * fb;
++        mrun = mm;
++      }
++    }
++
++    for (int r0 = 0; r0 < 64; r0 += 8) {
++      const int vr = r0 + (t >> 4);
++      const int vc = (t & 15) * 4;
++      if (ts + vr < N) {
++        const short4 hs = as_short4(convert_half4(vload4(0, V + (long)(ts + vr) * VD + h * VHD + vc)));
++        kv[vr][vc + 0] = hs.s0;
++        kv[vr][vc + 1] = hs.s1;
++        kv[vr][vc + 2] = hs.s2;
++        kv[vr][vc + 3] = hs.s3;
++      } else {
++        kv[vr][vc + 0] = 0;
++        kv[vr][vc + 1] = 0;
++        kv[vr][vc + 2] = 0;
++        kv[vr][vc + 3] = 0;
++      }
++    }
++    barrier(CLK_LOCAL_MEM_FENCE);
++
++    float8 ot = (float8)(0.0f);
++    const int p_off = q_half * 8;
++#pragma unroll
++    for (int c = 0; c < 4; c++) {
++      short8 a;
++#pragma unroll
++      for (int mm = 0; mm < 8; mm++) a[mm] = as_short(Pl[(p_off + mm) * 64 + c * 16 + lane]);
++      int8 b;
++#pragma unroll
++      for (int kk = 0; kk < 8; kk++) {
++        const ushort lo = as_ushort(kv[c * 16 + kk * 2][d_blk + lane]);
++        const ushort hi = as_ushort(kv[c * 16 + kk * 2 + 1][d_blk + lane]);
++        b[kk] = (int)((uint)lo | ((uint)hi << 16));
++      }
++      ot = intel_sub_group_f16_f16_matrix_mad_k16(a, b, ot);
++    }
++#pragma unroll
++    for (int i = 0; i < 8; i++) {
++      orun[i] = orun[i] * sub_group_broadcast(fa, p_off + i) + ot[i] * sub_group_broadcast(fb, p_off + i);
++    }
++    barrier(CLK_LOCAL_MEM_FENCE);
++  }
++
++  const int p_off = q_half * 8;
++#pragma unroll
++  for (int i = 0; i < 8; i++) {
++    const int tk = q0 + p_off + i;
++    if (tk < N) {
++      const float lf = sub_group_broadcast(lrun, p_off + i);
++      O[(long)tk * VD + h * VHD + d_blk + lane] = orun[i] / lf;
++    }
++  }
++}
++
++// Residual + LayerScale: x[row, c] += y[row, c] * ls[c] (D=1024); grid N_pos.
++KERNEL(256) void vit_ls_add(global float *x, global const float *y, global const float *ls) {
++  const int row = get_group_id(0), t = get_local_id(0);
++  const long base = (long)row * VD;
++  for (int i = 0; i < 4; i++) {
++    const int c = t + i * 256;
++    x[base + c] += y[base + c] * ls[c];
++  }
++}
++
++// 2x2 spatial patch merge (drops CLS row 0): [N_patches, 1024] -> [(wp/2)*(hp/2), 4096]; grid (wp/2)*(hp/2).
++KERNEL(256) void vit_merge_2x2(global const float *x, int wp, global float *out) {
++  const int out_idx = get_group_id(0), t = get_local_id(0);
++  const int mw = wp >> 1;
++  const int gy = out_idx / mw, gx = out_idx - gy * mw;
++  const int p00 = 1 + (2 * gy) * wp + (2 * gx);
++  const int p01 = p00 + 1;
++  const int p10 = 1 + (2 * gy + 1) * wp + (2 * gx);
++  const int p11 = p10 + 1;
++  global float *dst = out + (long)out_idx * (4 * VD);
++  for (int i = 0; i < 4; i++) {
++    const int c = t + i * 256;
++    dst[0 * VD + c] = x[(long)p00 * VD + c];
++    dst[1 * VD + c] = x[(long)p01 * VD + c];
++    dst[2 * VD + c] = x[(long)p10 * VD + c];
++    dst[3 * VD + c] = x[(long)p11 * VD + c];
++  }
++}
+diff --git a/zig/src/families/inkling2/xpu_main.zig b/zig/src/families/inkling2/xpu_main.zig
+index 4aead04b..90c86d89 100644
+--- a/zig/src/families/inkling2/xpu_main.zig
++++ b/zig/src/families/inkling2/xpu_main.zig
+@@ -5,6 +5,7 @@ const std = @import("std");
+ const ze = @import("ze");
+ const gguf = @import("gguf");
+ const kbin = @import("xpu_inkling2_kernels");
++const vit = @import("xpu_vit.zig");
+ 
+ const alloc = std.heap.c_allocator;
+ 
+@@ -104,12 +105,12 @@ const Dev = struct {
+     bytes: usize = 0,
+     prof: ?*Prof = null,
+ 
+-    fn alloc_(d: *Dev, n: usize) !*anyopaque {
++    pub fn alloc_(d: *Dev, n: usize) !*anyopaque {
+         d.bytes += n;
+         return d.g.deviceAlloc(@max(n, 64));
+     }
+ 
+-    fn sync(d: *Dev) !void {
++    pub fn sync(d: *Dev) !void {
+         try ze.check(d.g.api.zeCommandListHostSynchronize(d.list, std.math.maxInt(u64)));
+         if (d.prof) |p| {
+             for (p.events[0..p.used], p.kernel[0..p.used]) |e, k| {
+@@ -128,7 +129,7 @@ const Dev = struct {
+         }
+     }
+ 
+-    fn copyIn(d: *Dev, dst: *anyopaque, bytes: []const u8) !void {
++    pub fn copyIn(d: *Dev, dst: *anyopaque, bytes: []const u8) !void {
+         if (d.staging.len == 0) d.staging = @as([*]u8, @ptrCast(try d.g.hostAlloc(256 << 20)))[0 .. 256 << 20];
+         var done: usize = 0;
+         while (done < bytes.len) {
+@@ -140,7 +141,7 @@ const Dev = struct {
+         }
+     }
+ 
+-    fn upload(d: *Dev, bytes: []const u8) !*anyopaque {
++    pub fn upload(d: *Dev, bytes: []const u8) !*anyopaque {
+         const p = try d.alloc_(bytes.len);
+         try d.copyIn(p, bytes);
+         return p;
+@@ -160,7 +161,7 @@ const Dev = struct {
+         try d.copyIn(p, z);
+     }
+ 
+-    fn launch(d: *Dev, k: ze.H, groups: ze.GroupCount, args: anytype) !void {
++    pub fn launch(d: *Dev, k: ze.H, groups: ze.GroupCount, args: anytype) !void {
+         inline for (args, 0..) |a, i| try d.g.arg(k, i, a);
+         var ev: ze.H = null;
+         if (d.prof) |p| {
+@@ -560,6 +561,7 @@ const K = struct {
+     gemv_q8_4_dp4a: ze.H,
+     down_q8_dp4a: ze.H,
+     attn_b_xmx: ze.H,
++    embed_mix_b: ze.H,
+ };
+ 
+ const Slots = extern struct { n: i32, idx: [MAXS]i32 };
+@@ -663,6 +665,10 @@ const Runner = struct {
+     seed: u64 = 0,
+     host_tok: [*]u32 = undefined,
+     step_ev: [2]ze.H = @splat(null),
++    vision: ?vit.Vit = null,
++    img_pool: ?*anyopaque = null,
++    img_cap: usize = 0,
++    img_used: usize = 0,
+ 
+     fn kernels(d: *Dev) !K {
+         const g256 = if (getenv("INK2_GRF")) |v| std.mem.eql(u8, std.mem.span(v), "256") else false;
+@@ -748,6 +754,7 @@ const Runner = struct {
+             .gemv_q8_4_dp4a = try d.g.kernel(mod, "ink2_gemv_q8_4_dp4a"),
+             .down_q8_dp4a = try d.g.kernel(mod, "ink2_down_q8_dp4a"),
+             .attn_b_xmx = try d.g.kernel(mod, "ink2_attn_b_xmx"),
++            .embed_mix_b = try d.g.kernel(mod, "ink2_embed_mix_b"),
+         };
+     }
+ 
+@@ -851,6 +858,10 @@ const Runner = struct {
+         r.seed = 0;
+         r.host_tok = @ptrCast(@alignCast(try d.g.hostAlloc(64)));
+         r.step_ev = try d.g.events(2);
++        r.vision = null;
++        r.img_pool = null;
++        r.img_cap = 0;
++        r.img_used = 0;
+         try d.zero(a.counter, 64);
+         try r.reset();
+         return r;
+@@ -1192,7 +1203,7 @@ const Runner = struct {
+         const T: u32 = @intCast(ids.len);
+         const RC: i64 = TMAX * C; // floats between the selections of a [j][TMAX][C] buffer
+         var idb: [TMAX]i32 = undefined;
+-        for (ids, 0..) |t, i| idb[i] = @intCast(t);
++        for (ids, 0..) |t, i| idb[i] = @bitCast(t);
+         try d.copyIn(a.ids_b, std.mem.sliceAsBytes(idb[0..ids.len]));
+         var blocks_buf: [16]usize = undefined;
+         var blocks: std.ArrayList(usize) = .initBuffer(&blocks_buf);
+@@ -1203,7 +1214,11 @@ const Runner = struct {
+         var prelude_cur: usize = 0;
+         var bank_last: usize = 0;
+         var cur: usize = 0;
+-        try d.launch(r.k.embed_b, .{ .x = T }, .{ m.embed.q, m.embed.s, a.ids_b, m.embed_norm, m.eps, r.rowsOf(cur) });
++        if (r.img_pool) |pool| {
++            try d.launch(r.k.embed_mix_b, .{ .x = T }, .{ m.embed.q, m.embed.s, a.ids_b, m.embed_norm, m.eps, pool, r.rowsOf(cur) });
++        } else {
++            try d.launch(r.k.embed_b, .{ .x = T }, .{ m.embed.q, m.embed.s, a.ids_b, m.embed_norm, m.eps, r.rowsOf(cur) });
++        }
+         const n_core = CORE1 - CORE0;
+         const hsz = 3 * HIST * 4;
+         for (0..VISITS) |il| {
+@@ -1523,8 +1538,8 @@ const Runner = struct {
+ 
+ fn profReport(d: *Dev, k: *const K, steps: usize) void {
+     const p = d.prof orelse return;
+-    const names = [_][]const u8{ "embed", "embed_dev", "mix", "norm", "ctl_in", "ctl_out", "gemv_f32", "gemv_q8", "prep", "attn", "conv_res", "topk", "gateup_nvfp4", "down_nvfp4", "gateup_q8", "down_q8", "argmax_part", "argmax_final", "mix3", "ctl_down", "ctl_out2", "gemv_big", "attn2", "gemv_conv", "router", "gateup_nvfp4b", "down_nvfp4_conv", "down_q8_conv", "gemv_q8n", "gateup_nvfp4c", "down_nvfp4c", "mix3_b", "sample_part", "attn_split", "attn_merge", "prep", "mix3n", "gemv_bigx", "ctl_down8", "router8", "ctl_down_k", "router_k", "gemv_bigx2", "gemv_q8_2", "gemv_conv2", "attn_fd", "gemv_bigx4", "gemv_q8_4", "down_nvfp4d", "gemv_conv2s", "attn_fd2", "embed_b", "norm_b", "ctl_down_b", "ctl_out_b", "gemv_q8_b", "gemv_f32_b", "prep_b", "attn_b", "conv_res_b", "topk_b", "route_lists", "gateup_nvfp4_b", "gateup_q8_b", "down_nvfp4_b", "down_q8_b", "combine_b", "gemm_q8_xmx", "gateup_nvfp4_xmx", "down_nvfp4_xmx", "gateup_q8_xmx", "down_q8_xmx", "quant_q8", "gemv_bigx4_dp4a", "gemv_conv2s_dp4a", "gemv_q8_4_dp4a", "down_q8_dp4a", "attn_b_xmx" };
+-    const hs = [_]ze.H{ k.embed, k.embed_dev, k.mix, k.norm, k.ctl_in, k.ctl_out, k.gemv_f32, k.gemv_q8, k.prep, k.attn, k.conv_res, k.topk, k.gateup_nvfp4, k.down_nvfp4, k.gateup_q8, k.down_q8, k.argmax_part, k.argmax_final, k.mix3, k.ctl_down, k.ctl_out2, k.gemv_big, k.attn2, k.gemv_conv, k.router, k.gateup_nvfp4b, k.down_nvfp4_conv, k.down_q8_conv, k.gemv_q8n, k.gateup_nvfp4c, k.down_nvfp4c, k.mix3_b, k.sample_part, k.attn_split, k.attn_merge, k.prep, k.mix3n, k.gemv_bigx, k.ctl_down8, k.router8, k.ctl_down_k, k.router_k, k.gemv_bigx2, k.gemv_q8_2, k.gemv_conv2, k.attn_fd, k.gemv_bigx4, k.gemv_q8_4, k.down_nvfp4d, k.gemv_conv2s, k.attn_fd2, k.embed_b, k.norm_b, k.ctl_down_b, k.ctl_out_b, k.gemv_q8_b, k.gemv_f32_b, k.prep_b, k.attn_b, k.conv_res_b, k.topk_b, k.route_lists, k.gateup_nvfp4_b, k.gateup_q8_b, k.down_nvfp4_b, k.down_q8_b, k.combine_b, k.gemm_q8_xmx, k.gateup_nvfp4_xmx, k.down_nvfp4_xmx, k.gateup_q8_xmx, k.down_q8_xmx, k.quant_q8, k.gemv_bigx4_dp4a, k.gemv_conv2s_dp4a, k.gemv_q8_4_dp4a, k.down_q8_dp4a, k.attn_b_xmx };
++    const names = [_][]const u8{ "embed", "embed_dev", "mix", "norm", "ctl_in", "ctl_out", "gemv_f32", "gemv_q8", "prep", "attn", "conv_res", "topk", "gateup_nvfp4", "down_nvfp4", "gateup_q8", "down_q8", "argmax_part", "argmax_final", "mix3", "ctl_down", "ctl_out2", "gemv_big", "attn2", "gemv_conv", "router", "gateup_nvfp4b", "down_nvfp4_conv", "down_q8_conv", "gemv_q8n", "gateup_nvfp4c", "down_nvfp4c", "mix3_b", "sample_part", "attn_split", "attn_merge", "prep", "mix3n", "gemv_bigx", "ctl_down8", "router8", "ctl_down_k", "router_k", "gemv_bigx2", "gemv_q8_2", "gemv_conv2", "attn_fd", "gemv_bigx4", "gemv_q8_4", "down_nvfp4d", "gemv_conv2s", "attn_fd2", "embed_b", "embed_mix_b", "norm_b", "ctl_down_b", "ctl_out_b", "gemv_q8_b", "gemv_f32_b", "prep_b", "attn_b", "conv_res_b", "topk_b", "route_lists", "gateup_nvfp4_b", "gateup_q8_b", "down_nvfp4_b", "down_q8_b", "combine_b", "gemm_q8_xmx", "gateup_nvfp4_xmx", "down_nvfp4_xmx", "gateup_q8_xmx", "down_q8_xmx", "quant_q8", "gemv_bigx4_dp4a", "gemv_conv2s_dp4a", "gemv_q8_4_dp4a", "down_q8_dp4a", "attn_b_xmx" };
++    const hs = [_]ze.H{ k.embed, k.embed_dev, k.mix, k.norm, k.ctl_in, k.ctl_out, k.gemv_f32, k.gemv_q8, k.prep, k.attn, k.conv_res, k.topk, k.gateup_nvfp4, k.down_nvfp4, k.gateup_q8, k.down_q8, k.argmax_part, k.argmax_final, k.mix3, k.ctl_down, k.ctl_out2, k.gemv_big, k.attn2, k.gemv_conv, k.router, k.gateup_nvfp4b, k.down_nvfp4_conv, k.down_q8_conv, k.gemv_q8n, k.gateup_nvfp4c, k.down_nvfp4c, k.mix3_b, k.sample_part, k.attn_split, k.attn_merge, k.prep, k.mix3n, k.gemv_bigx, k.ctl_down8, k.router8, k.ctl_down_k, k.router_k, k.gemv_bigx2, k.gemv_q8_2, k.gemv_conv2, k.attn_fd, k.gemv_bigx4, k.gemv_q8_4, k.down_nvfp4d, k.gemv_conv2s, k.attn_fd2, k.embed_b, k.embed_mix_b, k.norm_b, k.ctl_down_b, k.ctl_out_b, k.gemv_q8_b, k.gemv_f32_b, k.prep_b, k.attn_b, k.conv_res_b, k.topk_b, k.route_lists, k.gateup_nvfp4_b, k.gateup_q8_b, k.down_nvfp4_b, k.down_q8_b, k.combine_b, k.gemm_q8_xmx, k.gateup_nvfp4_xmx, k.down_nvfp4_xmx, k.gateup_q8_xmx, k.down_q8_xmx, k.quant_q8, k.gemv_bigx4_dp4a, k.gemv_conv2s_dp4a, k.gemv_q8_4_dp4a, k.down_q8_dp4a, k.attn_b_xmx };
+     var sum: f64 = 0;
+     var launches: u64 = 0;
+     for (p.total, p.count) |t, c| {
+@@ -1606,9 +1621,14 @@ const PrefixCkpt = struct {
+     fn matches(c: *const PrefixCkpt, ids: []const u32) bool {
+         return c.ids.items.len > 0 and ids.len > c.ids.items.len and std.mem.eql(u32, ids[0..c.ids.items.len], c.ids.items);
+     }
++
++    fn hasImages(c: *const PrefixCkpt) bool {
++        for (c.ids.items) |id| if (id >= 0x8000_0000) return true;
++        return false;
++    }
+ };
+ 
+-/// --serve: "<max_new> <temp> <seed> <id>..." with prefix cache; emits "t <id>" and "e <p> <g> <ps> <ds>".
++/// --serve: "<max_new> <temp> <seed> <id>..." or "img <wp> <hp> <path>"; emits "t"/"e"/"i" lines.
+ fn serve(r: *Runner, eos: u32) !void {
+     const use_prefix = !r.v1 and getenv("INK2_NOPREFIX") == null;
+     var ckpt_sys: PrefixCkpt = if (use_prefix) try PrefixCkpt.init(r.d) else .{};
+@@ -1629,13 +1649,43 @@ fn serve(r: *Runner, eos: u32) !void {
+         defer alloc.free(line);
+         try buf.replaceRange(alloc, 0, nl.? + 1, &.{});
+         var it = std.mem.tokenizeScalar(u8, line, ' ');
+-        const max_new = try std.fmt.parseInt(usize, it.next() orelse continue, 10);
++        const first = it.next() orelse continue;
++        var msg: [96]u8 = undefined;
++        if (std.mem.eql(u8, first, "img")) {
++            const wp = try std.fmt.parseInt(usize, it.next() orelse return error.BadRequest, 10);
++            const hp = try std.fmt.parseInt(usize, it.next() orelse return error.BadRequest, 10);
++            const path = it.next() orelse return error.BadRequest;
++            if (r.vision == null or r.img_pool == null) {
++                writeOut("x no_mmproj\n");
++                continue;
++            }
++            const n_img = (wp / 2) * (hp / 2);
++            if (n_img == 0 or n_img > r.img_cap) {
++                writeOut("x image_too_large\n");
++                continue;
++            }
++            var wrapped: u32 = 0;
++            if (r.img_used + n_img > r.img_cap) {
++                r.img_used = 0;
++                wrapped = 1;
++                if (ckpt_sys.hasImages()) ckpt_sys.clear();
++                if (ckpt_last.hasImages()) ckpt_last.clear();
++            }
++            const raw = try mapFile(path);
++            const off_i = r.img_used;
++            const tv0 = now();
++            _ = try r.vision.?.encode(r.d, raw, wp, hp, off(r.img_pool.?, off_i * C * 4));
++            const tv1 = now();
++            r.img_used += n_img;
++            writeOut(try std.fmt.bufPrint(&msg, "i {d} {d} {d:.3} {d}\n", .{ off_i, n_img, (tv1 - tv0) * 1e3, wrapped }));
++            continue;
++        }
++        const max_new = try std.fmt.parseInt(usize, first, 10);
+         r.temp = try std.fmt.parseFloat(f32, it.next() orelse return error.BadRequest);
+         r.seed = try std.fmt.parseInt(u64, it.next() orelse return error.BadRequest, 10);
+         var ids: std.ArrayList(u32) = .empty;
+         defer ids.deinit(alloc);
+         while (it.next()) |w| try ids.append(alloc, try std.fmt.parseInt(u32, w, 10));
+-        var msg: [96]u8 = undefined;
+         if (ids.items.len == 0 or ids.items.len + max_new > r.ctx) {
+             writeOut(try std.fmt.bufPrint(&msg, "x context {d}\n", .{r.ctx}));
+             continue;
+@@ -1732,11 +1782,18 @@ pub fn main(init: std.process.Init) !void {
+     const argv = try init.minimal.args.toSlice(init.arena.allocator());
+     if (argv.len >= 4 and std.mem.eql(u8, argv[2], "--serve")) {
+         const ctx = try std.fmt.parseInt(usize, argv[3], 10);
++        var mmproj_path: ?[]const u8 = null;
++        if (argv.len >= 6 and std.mem.eql(u8, argv[4], "--mmproj")) mmproj_path = argv[5];
+         var d: Dev = .{ .g = try ze.Gpu.open(0xe223), .list = undefined };
+         defer d.g.close();
+         d.list = try d.g.immediate(0, 0);
+         var m = try load(&d, argv[1]);
+         var r = try Runner.init(&d, &m, ctx);
++        if (mmproj_path) |mp| {
++            r.vision = try vit.Vit.load(&d, try mapFile(mp));
++            r.img_cap = 16384;
++            r.img_pool = try d.alloc_(r.img_cap * C * 4);
++        }
+         std.debug.print("ready ctx={d}, {d:.2} GB total on the card\n", .{ ctx, @as(f64, @floatFromInt(d.bytes)) / 1e9 });
+         return serve(&r, 200006);
+     }
+diff --git a/zig/src/families/inkling2/xpu_vit.zig b/zig/src/families/inkling2/xpu_vit.zig
+new file mode 100644
+index 00000000..90ea7562
+--- /dev/null
++++ b/zig/src/families/inkling2/xpu_vit.zig
+@@ -0,0 +1,199 @@
++//! Inkling 2 Mini vision tower (mmproj-F16.gguf, inkling2v) on Intel Xe2 XMX.
++const std = @import("std");
++const ze = @import("ze");
++const gguf = @import("gguf");
++const kbin = @import("xpu_inkling2_kernels");
++
++const alloc = std.heap.c_allocator;
++
++pub const VD: usize = 1024;
++pub const VFF: usize = 4096;
++pub const VLAYERS: usize = 23;
++pub const PATCH_DIM: usize = 3 * 20 * 20;
++pub const PROJ_OUT: usize = 2304;
++pub const EPS: f32 = 1e-5;
++
++const VitLayer = struct {
++    ln1_w: *anyopaque,
++    ln1_b: *anyopaque,
++    ln2_w: *anyopaque,
++    ln2_b: *anyopaque,
++    ls1_w: *anyopaque,
++    ls2_w: *anyopaque,
++    q_w: *anyopaque,
++    q_b: *anyopaque,
++    k_w: *anyopaque,
++    k_b: *anyopaque,
++    v_w: *anyopaque,
++    v_b: *anyopaque,
++    o_w: *anyopaque,
++    o_b: *anyopaque,
++    up_w: *anyopaque,
++    up_b: *anyopaque,
++    down_w: *anyopaque,
++    down_b: *anyopaque,
++};
++
++const VitK = struct {
++    gemm: ze.H,
++    add_pos: ze.H,
++    ln: ze.H,
++    rope2d: ze.H,
++    attn: ze.H,
++    ls_add: ze.H,
++    merge2x2: ze.H,
++};
++
++pub const Vit = struct {
++    k: VitK,
++    cls: *anyopaque,
++    cls_pos: *anyopaque,
++    patch_w: *anyopaque,
++    pos_embd: *anyopaque,
++    pre_ln_w: *anyopaque,
++    pre_ln_b: *anyopaque,
++    mm1_w: *anyopaque,
++    mm2_w: *anyopaque,
++    layers: [VLAYERS]VitLayer,
++    // Reusable scratch sized dynamically to max_pos.
++    cap_pos: usize = 0,
++    buf_patch: *anyopaque = undefined,
++    buf_pout: *anyopaque = undefined,
++    buf_x: *anyopaque = undefined,
++    buf_h: *anyopaque = undefined,
++    buf_q: *anyopaque = undefined,
++    buf_k: *anyopaque = undefined,
++    buf_v: *anyopaque = undefined,
++    buf_o: *anyopaque = undefined,
++    buf_ff: *anyopaque = undefined,
++
++    fn need(doc: *const gguf.Document, name: []const u8) !gguf.Tensor {
++        return doc.getTensor(name) orelse {
++            std.debug.print("mmproj: missing tensor {s}\n", .{name});
++            return error.MissingTensor;
++        };
++    }
++
++    fn uploadRaw(d: anytype, doc: *const gguf.Document, name: []const u8, comptime kind: anytype) !*anyopaque {
++        const t = try need(doc, name);
++        if (t.kind != kind) {
++            std.debug.print("mmproj: unexpected kind for {s}\n", .{name});
++            return error.UnexpectedTensorType;
++        }
++        return d.upload(t.bytes);
++    }
++
++    pub fn load(d: anytype, raw: []const u8) !Vit {
++        const doc = try gguf.Document.parse(alloc, raw, .{});
++        const mod = try d.g.module(kbin.vit[0..]);
++        var v: Vit = undefined;
++        v.cap_pos = 0;
++        v.k = .{
++            .gemm = try d.g.kernel(mod, "vit_gemm_f16_xmx"),
++            .add_pos = try d.g.kernel(mod, "vit_add_pos_cls"),
++            .ln = try d.g.kernel(mod, "vit_ln"),
++            .rope2d = try d.g.kernel(mod, "vit_rope2d"),
++            .attn = try d.g.kernel(mod, "vit_attn_xmx"),
++            .ls_add = try d.g.kernel(mod, "vit_ls_add"),
++            .merge2x2 = try d.g.kernel(mod, "vit_merge_2x2"),
++        };
++        v.cls = try uploadRaw(d, &doc, "v.class_embd", .f32);
++        v.cls_pos = try uploadRaw(d, &doc, "v.class_position_embd.weight", .f32);
++        v.patch_w = try uploadRaw(d, &doc, "v.patch_embd.weight", .f16);
++        v.pos_embd = try uploadRaw(d, &doc, "v.position_embd.weight", .f32);
++        v.pre_ln_w = try uploadRaw(d, &doc, "v.pre_ln.weight", .f32);
++        v.pre_ln_b = try uploadRaw(d, &doc, "v.pre_ln.bias", .f32);
++        v.mm1_w = try uploadRaw(d, &doc, "mm.1.weight", .f16);
++        v.mm2_w = try uploadRaw(d, &doc, "mm.2.weight", .f16);
++        var nb: [64]u8 = undefined;
++        for (0..VLAYERS) |il| {
++            v.layers[il] = .{
++                .ln1_w = try uploadRaw(d, &doc, try std.fmt.bufPrint(&nb, "v.blk.{d}.ln1.weight", .{il}), .f32),
++                .ln1_b = try uploadRaw(d, &doc, try std.fmt.bufPrint(&nb, "v.blk.{d}.ln1.bias", .{il}), .f32),
++                .ln2_w = try uploadRaw(d, &doc, try std.fmt.bufPrint(&nb, "v.blk.{d}.ln2.weight", .{il}), .f32),
++                .ln2_b = try uploadRaw(d, &doc, try std.fmt.bufPrint(&nb, "v.blk.{d}.ln2.bias", .{il}), .f32),
++                .ls1_w = try uploadRaw(d, &doc, try std.fmt.bufPrint(&nb, "v.blk.{d}.ls1.weight", .{il}), .f32),
++                .ls2_w = try uploadRaw(d, &doc, try std.fmt.bufPrint(&nb, "v.blk.{d}.ls2.weight", .{il}), .f32),
++                .q_w = try uploadRaw(d, &doc, try std.fmt.bufPrint(&nb, "v.blk.{d}.attn_q.weight", .{il}), .f16),
++                .q_b = try uploadRaw(d, &doc, try std.fmt.bufPrint(&nb, "v.blk.{d}.attn_q.bias", .{il}), .f32),
++                .k_w = try uploadRaw(d, &doc, try std.fmt.bufPrint(&nb, "v.blk.{d}.attn_k.weight", .{il}), .f16),
++                .k_b = try uploadRaw(d, &doc, try std.fmt.bufPrint(&nb, "v.blk.{d}.attn_k.bias", .{il}), .f32),
++                .v_w = try uploadRaw(d, &doc, try std.fmt.bufPrint(&nb, "v.blk.{d}.attn_v.weight", .{il}), .f16),
++                .v_b = try uploadRaw(d, &doc, try std.fmt.bufPrint(&nb, "v.blk.{d}.attn_v.bias", .{il}), .f32),
++                .o_w = try uploadRaw(d, &doc, try std.fmt.bufPrint(&nb, "v.blk.{d}.attn_out.weight", .{il}), .f16),
++                .o_b = try uploadRaw(d, &doc, try std.fmt.bufPrint(&nb, "v.blk.{d}.attn_out.bias", .{il}), .f32),
++                .up_w = try uploadRaw(d, &doc, try std.fmt.bufPrint(&nb, "v.blk.{d}.ffn_up.weight", .{il}), .f16),
++                .up_b = try uploadRaw(d, &doc, try std.fmt.bufPrint(&nb, "v.blk.{d}.ffn_up.bias", .{il}), .f32),
++                .down_w = try uploadRaw(d, &doc, try std.fmt.bufPrint(&nb, "v.blk.{d}.ffn_down.weight", .{il}), .f16),
++                .down_b = try uploadRaw(d, &doc, try std.fmt.bufPrint(&nb, "v.blk.{d}.ffn_down.bias", .{il}), .f32),
++            };
++        }
++        return v;
++    }
++
++    fn ensureScratch(v: *Vit, d: anytype, n_pos: usize) !void {
++        if (n_pos <= v.cap_pos) return;
++        const cap = @max(n_pos, 1025);
++        v.buf_patch = try d.alloc_(cap * PATCH_DIM * 4);
++        v.buf_pout = try d.alloc_(cap * VD * 4);
++        v.buf_x = try d.alloc_(cap * VD * 4);
++        v.buf_h = try d.alloc_(cap * VD * 4);
++        v.buf_q = try d.alloc_(cap * VD * 4);
++        v.buf_k = try d.alloc_(cap * VD * 4);
++        v.buf_v = try d.alloc_(cap * VD * 4);
++        v.buf_o = try d.alloc_(cap * VD * 4);
++        v.buf_ff = try d.alloc_(cap * VFF * 4);
++        v.cap_pos = cap;
++    }
++
++    /// Encode [wp*hp, 1200] float32 patches into [(wp/2)*(hp/2), 2304] float32 embeddings at `dst`.
++    pub fn encode(v: *Vit, d: anytype, patches_bytes: []const u8, wp: usize, hp: usize, dst: *anyopaque) !usize {
++        if (wp == 0 or hp == 0 or (wp & 1) != 0 or (hp & 1) != 0) return error.BadImageGrid;
++        const n_patches = wp * hp;
++        const n_pos = n_patches + 1;
++        const n_img = (wp / 2) * (hp / 2);
++        if (patches_bytes.len != n_patches * PATCH_DIM * 4) return error.BadImageBytes;
++        try v.ensureScratch(d, n_pos);
++        try d.copyIn(v.buf_patch, patches_bytes);
++
++        const null_p: ?*anyopaque = null;
++        const np_i: i32 = @intCast(n_patches);
++        const npos_i: i32 = @intCast(n_pos);
++        const npos_u: u32 = @intCast(n_pos);
++        const tiles_p: u32 = @intCast((n_patches + 15) / 16);
++        const tiles_pos: u32 = @intCast((n_pos + 15) / 16);
++
++        // Patch embedding GEMM [n_patches, 1200] @ [1024, 1200]^T -> [n_patches, 1024].
++        try d.launch(v.k.gemm, .{ .x = VD / 64, .y = tiles_p }, .{ v.buf_patch, v.patch_w, null_p, v.buf_pout, np_i, @as(i32, VD), @as(i32, PATCH_DIM), @as(i32, 0) });
++        // Prepend CLS + add bilinear-resized 32x32 position embeddings -> buf_h, then pre_ln -> buf_x.
++        try d.launch(v.k.add_pos, .{ .x = npos_u }, .{ v.buf_pout, v.cls, v.cls_pos, v.pos_embd, @as(i32, @intCast(wp)), @as(i32, @intCast(hp)), v.buf_h });
++        try d.launch(v.k.ln, .{ .x = npos_u }, .{ v.buf_h, v.pre_ln_w, v.pre_ln_b, EPS, v.buf_x });
++
++        for (0..VLAYERS) |il| {
++            const l = &v.layers[il];
++            try d.launch(v.k.ln, .{ .x = npos_u }, .{ v.buf_x, l.ln1_w, l.ln1_b, EPS, v.buf_h });
++            try d.launch(v.k.gemm, .{ .x = VD / 64, .y = tiles_pos }, .{ v.buf_h, l.q_w, @as(?*anyopaque, l.q_b), v.buf_q, npos_i, @as(i32, VD), @as(i32, VD), @as(i32, 0) });
++            try d.launch(v.k.gemm, .{ .x = VD / 64, .y = tiles_pos }, .{ v.buf_h, l.k_w, @as(?*anyopaque, l.k_b), v.buf_k, npos_i, @as(i32, VD), @as(i32, VD), @as(i32, 0) });
++            try d.launch(v.k.gemm, .{ .x = VD / 64, .y = tiles_pos }, .{ v.buf_h, l.v_w, @as(?*anyopaque, l.v_b), v.buf_v, npos_i, @as(i32, VD), @as(i32, VD), @as(i32, 0) });
++            try d.launch(v.k.rope2d, .{ .x = npos_u }, .{ v.buf_q, v.buf_k, @as(i32, @intCast(wp)) });
++            try d.launch(v.k.attn, .{ .x = 16, .y = tiles_pos }, .{ v.buf_q, v.buf_k, v.buf_v, v.buf_o, npos_i });
++            try d.launch(v.k.gemm, .{ .x = VD / 64, .y = tiles_pos }, .{ v.buf_o, l.o_w, @as(?*anyopaque, l.o_b), v.buf_h, npos_i, @as(i32, VD), @as(i32, VD), @as(i32, 0) });
++            try d.launch(v.k.ls_add, .{ .x = npos_u }, .{ v.buf_x, v.buf_h, l.ls1_w });
++
++            try d.launch(v.k.ln, .{ .x = npos_u }, .{ v.buf_x, l.ln2_w, l.ln2_b, EPS, v.buf_h });
++            try d.launch(v.k.gemm, .{ .x = VFF / 64, .y = tiles_pos }, .{ v.buf_h, l.up_w, @as(?*anyopaque, l.up_b), v.buf_ff, npos_i, @as(i32, VFF), @as(i32, VD), @as(i32, 1) });
++            try d.launch(v.k.gemm, .{ .x = VD / 64, .y = tiles_pos }, .{ v.buf_ff, l.down_w, @as(?*anyopaque, l.down_b), v.buf_h, npos_i, @as(i32, VD), @as(i32, VFF), @as(i32, 0) });
++            try d.launch(v.k.ls_add, .{ .x = npos_u }, .{ v.buf_x, v.buf_h, l.ls2_w });
++        }
++
++        // Drop CLS + 2x2 merge into buf_ff [n_img, 4096], then 2-layer GELU projector into dst [n_img, 2304].
++        const nimg_i: i32 = @intCast(n_img);
++        const tiles_img: u32 = @intCast((n_img + 15) / 16);
++        try d.launch(v.k.merge2x2, .{ .x = @as(u32, @intCast(n_img)) }, .{ v.buf_x, @as(i32, @intCast(wp)), v.buf_ff });
++        // Reuse buf_patch (cap_pos * 1200 >= n_img * 4096 since cap_pos >= 4*n_img) for mm.1 output.
++        try d.launch(v.k.gemm, .{ .x = VFF / 64, .y = tiles_img }, .{ v.buf_ff, v.mm1_w, null_p, v.buf_patch, nimg_i, @as(i32, VFF), @as(i32, VFF), @as(i32, 1) });
++        try d.launch(v.k.gemm, .{ .x = PROJ_OUT / 64, .y = tiles_img }, .{ v.buf_patch, v.mm2_w, null_p, dst, nimg_i, @as(i32, PROJ_OUT), @as(i32, VFF), @as(i32, 0) });
++        try d.sync();
++        return n_img;
++    }
++};
+-- 
+2.53.0
+

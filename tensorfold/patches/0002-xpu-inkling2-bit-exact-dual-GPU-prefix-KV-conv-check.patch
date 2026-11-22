@@ -1,0 +1,142 @@
+From f1e74aa901f4f7d52adf4904d2f13ffa06a2226a Mon Sep 17 00:00:00 2001
+From: Marc Aldrich <7917445+MarcAldrich@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 23:03:13 -0600
+Subject: [PATCH 2/4] xpu-inkling2: bit-exact dual GPU prefix KV/conv
+ checkpoint cache in --serve
+
+Add ckpt_sys (system/tools prefix before first <|message_user|>) and ckpt_last (prior prompt
+prefix) checkpoints in --serve mode (INK2_NOPREFIX=1 disables). Snapshots hist2 and the 40
+sliding-window KV rings while keeping the 8 global KV caches append-only in-place with strict
+p0 < ckpt.len invalidation. Finishes resumed prefill via prefillRange for bit-identical token_sha.
+---
+ zig/src/families/inkling2/xpu_main.zig | 105 ++++++++++++++++++++++++-
+ 1 file changed, 102 insertions(+), 3 deletions(-)
+
+diff --git a/zig/src/families/inkling2/xpu_main.zig b/zig/src/families/inkling2/xpu_main.zig
+index 8dfa5a91..4aead04b 100644
+--- a/zig/src/families/inkling2/xpu_main.zig
++++ b/zig/src/families/inkling2/xpu_main.zig
+@@ -1552,8 +1552,68 @@ fn writeOut(bytes: []const u8) void {
+     }
+ }
+ 
+-/// --serve: "<max_new> <temp> <seed> <id>..." per line; emits "t <id>" and "e <p> <g> <ps> <ds>".
++/// GPU checkpoint of hist2 and sliding KV rings for prefix reuse; global KV stays append-only in-place.
++const PrefixCkpt = struct {
++    ids: std.ArrayList(u32) = .empty,
++    hist2: *anyopaque = undefined,
++    kc: [VISITS]?*anyopaque = @splat(null),
++    vc: [VISITS]?*anyopaque = @splat(null),
++
++    fn init(d: *Dev) !PrefixCkpt {
++        var c: PrefixCkpt = .{};
++        c.hist2 = try d.alloc_(VISITS * 2 * 3 * HIST * 4);
++        for (0..VISITS) |il| {
++            if (!isGlobal(layerOf(il))) {
++                c.kc[il] = try d.alloc_(RING * NKV * HD * 2);
++                c.vc[il] = try d.alloc_(RING * NKV * HD * 2);
++            }
++        }
++        return c;
++    }
++
++    fn clear(c: *PrefixCkpt) void {
++        c.ids.clearRetainingCapacity();
++    }
++
++    fn save(c: *PrefixCkpt, r: *Runner, ids: []const u32) !void {
++        const d = r.d;
++        const a = &r.a;
++        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, c.hist2, a.hist2, VISITS * 2 * 3 * HIST * 4, null, 0, null));
++        for (0..VISITS) |il| {
++            if (c.kc[il]) |dst_k| {
++                const nb = RING * NKV * HD * 2;
++                try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, dst_k, a.kc[il], nb, null, 0, null));
++                try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, c.vc[il].?, a.vc[il], nb, null, 0, null));
++            }
++        }
++        c.ids.clearRetainingCapacity();
++        try c.ids.appendSlice(alloc, ids);
++    }
++
++    fn restore(c: *const PrefixCkpt, r: *Runner) !void {
++        const d = r.d;
++        const a = &r.a;
++        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.hist2, c.hist2, VISITS * 2 * 3 * HIST * 4, null, 0, null));
++        for (0..VISITS) |il| {
++            if (c.kc[il]) |src_k| {
++                const nb = RING * NKV * HD * 2;
++                try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.kc[il], src_k, nb, null, 0, null));
++                try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.vc[il], c.vc[il].?, nb, null, 0, null));
++            }
++        }
++    }
++
++    fn matches(c: *const PrefixCkpt, ids: []const u32) bool {
++        return c.ids.items.len > 0 and ids.len > c.ids.items.len and std.mem.eql(u32, ids[0..c.ids.items.len], c.ids.items);
++    }
++};
++
++/// --serve: "<max_new> <temp> <seed> <id>..." with prefix cache; emits "t <id>" and "e <p> <g> <ps> <ds>".
+ fn serve(r: *Runner, eos: u32) !void {
++    const use_prefix = !r.v1 and getenv("INK2_NOPREFIX") == null;
++    var ckpt_sys: PrefixCkpt = if (use_prefix) try PrefixCkpt.init(r.d) else .{};
++    var ckpt_last: PrefixCkpt = if (use_prefix) try PrefixCkpt.init(r.d) else .{};
++    const MESSAGE_USER: u32 = 200000;
+     var buf: std.ArrayList(u8) = .empty;
+     var chunk: [65536]u8 = undefined;
+     writeOut("ready\n");
+@@ -1580,9 +1640,48 @@ fn serve(r: *Runner, eos: u32) !void {
+             writeOut(try std.fmt.bufPrint(&msg, "x context {d}\n", .{r.ctx}));
+             continue;
+         }
+-        try r.reset();
+         const t0 = now();
+-        var next = try r.prefill(ids.items);
++        var next: u32 = 0;
++        if (use_prefix and ids.items.len >= 2) {
++            var p0: usize = 0;
++            var hit_last = false;
++            var hit_sys = false;
++            if (ckpt_last.matches(ids.items)) {
++                p0 = ckpt_last.ids.items.len;
++                hit_last = true;
++            }
++            if (ckpt_sys.matches(ids.items) and ckpt_sys.ids.items.len > p0) {
++                p0 = ckpt_sys.ids.items.len;
++                hit_last = false;
++                hit_sys = true;
++            }
++            // Invalidate any checkpoint beyond p0 since global KV >= p0 will be overwritten.
++            if (ckpt_last.ids.items.len > p0) ckpt_last.clear();
++            if (ckpt_sys.ids.items.len > p0) ckpt_sys.clear();
++            if (hit_last) {
++                try ckpt_last.restore(r);
++            } else if (hit_sys) {
++                try ckpt_sys.restore(r);
++            } else {
++                try r.reset();
++            }
++            var cur_p: usize = p0;
++            // Save system+tools+effort prefix right before the first <|message_user|> token if >= 256 tokens.
++            if (ckpt_sys.ids.items.len == 0) {
++                if (std.mem.indexOfScalar(u32, ids.items, MESSAGE_USER)) |u_idx| {
++                    if (u_idx >= 256 and u_idx > cur_p and u_idx < ids.items.len) {
++                        _ = try r.prefillRange(ids.items[cur_p..u_idx], cur_p, false);
++                        try ckpt_sys.save(r, ids.items[0..u_idx]);
++                        cur_p = u_idx;
++                    }
++                }
++            }
++            next = try r.prefillRange(ids.items[cur_p..], cur_p, true);
++            try ckpt_last.save(r, ids.items);
++        } else {
++            try r.reset();
++            next = try r.prefill(ids.items);
++        }
+         const t1 = now();
+         var n_gen: usize = 0;
+         if (!r.v1 and !r.sync_step and r.dump == null and max_new > 1) {
+-- 
+2.53.0
+
