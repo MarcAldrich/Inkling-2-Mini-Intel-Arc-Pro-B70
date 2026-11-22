@@ -1,0 +1,339 @@
+From 1ff691913bc889d0bcd0e019e8f4072b6227f116 Mon Sep 17 00:00:00 2001
+From: Marc Aldrich <7917445+MarcAldrich@users.noreply.github.com>
+Date: Sun, 22 Nov 2026 08:15:06 -0600
+Subject: [PATCH 5/5] xpu-inkling2: fix Gumbel float32 +INF bug, add
+ top_p/top_k/min_p, zero XMX KV tail
+
+---
+ tools/xpu/inkling2_serve.py            |  33 +++++---
+ zig/kernels/xpu/inkling2/ink2.cl       |  30 +++----
+ zig/src/families/inkling2/xpu_main.zig | 111 +++++++++++++++++++++++--
+ 3 files changed, 141 insertions(+), 33 deletions(-)
+
+diff --git a/tools/xpu/inkling2_serve.py b/tools/xpu/inkling2_serve.py
+index 0497427a..cf0a7b7b 100644
+--- a/tools/xpu/inkling2_serve.py
++++ b/tools/xpu/inkling2_serve.py
+@@ -1,11 +1,11 @@
+ #!/usr/bin/env python3
+-"""OpenAI-compatible chat server over `xpu-inkling2 MODEL --serve CTX` (one request at a time, every prompt cold).
++"""OpenAI-compatible chat server over `xpu-inkling2 MODEL --serve CTX` (prefix-cached, multimodal vision, tool calling).
+ 
+-  inkling2_serve.py --runner BIN --model MODEL.gguf --meta DIR --port N [--ctx 49152]
++  inkling2_serve.py --runner BIN --model MODEL.gguf [--mmproj MMPROJ.gguf] --meta DIR --host HOST --port N [--ctx 49152]
+ 
+-DIR holds the release's tokenizer.json and chat_template.jinja. Sampling: temperature (default 1.0, the release's
+-generation_config) and seed; top_p must be 1 and penalties 0, anything else is refused. Reasoning text streams as
+-`reasoning_content`, the answer as `content`, split on <|content_thinking|> and <|content_text|>.
++DIR holds the release's tokenizer.json and chat_template.jinja. Supports temperature (default 1.0, the release's
++generation_config), top_p, top_k, min_p, seed, reasoning_effort, OpenAI tools/tool_calls, and image_url inputs.
++Reasoning text streams as `reasoning_content`, the answer as `content`, split on <|content_thinking|> and <|content_text|>.
+ """
+ import argparse
+ import base64
+@@ -103,7 +103,8 @@ def normalize_messages(messages):
+                 args = fn.get("arguments")
+                 if isinstance(args, str):
+                     try:
+-                        fn["arguments"] = json.loads(args) if args.strip() else {}
++                        parsed = json.loads(args) if args.strip() else {}
++                        fn["arguments"] = parsed if isinstance(parsed, dict) else {"_raw": args}
+                     except json.JSONDecodeError:
+                         fn["arguments"] = {"_raw": args}
+                 tc["function"] = fn
+@@ -157,9 +158,9 @@ class Runner:
+             except OSError:
+                 pass
+ 
+-    def generate(self, ids, max_new, temp, seed):
++    def generate(self, ids, max_new, temp, seed, top_p=1.0, top_k=0, min_p=0.0):
+         """Yields ("t", id) per token, then ("e", prompt_n, gen_n, prefill_s, decode_s)."""
+-        self.p.stdin.write(f"{max_new} {temp} {seed} " + " ".join(map(str, ids)) + "\n")
++        self.p.stdin.write(f"s {max_new} {temp} {top_p} {top_k} {min_p} {seed} " + " ".join(map(str, ids)) + "\n")
+         self.p.stdin.flush()
+         while True:
+             line = self.p.stdout.readline()
+@@ -279,7 +280,16 @@ def make_handler(args, runner, tok, template):
+             if not self.path.startswith("/v1/chat/completions"):
+                 return self.reply(404, {"error": "not found"})
+             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+-            top_k = body.get("top_k")
++            raw_top_k = body.get("top_k")
++            top_k = 0 if raw_top_k is None else int(raw_top_k)
++            top_p = 1.0 if body.get("top_p") is None else float(body.get("top_p"))
++            min_p = 0.0 if body.get("min_p") is None else float(body.get("min_p"))
++            if not (0.0 < top_p <= 1.0):
++                return self.reply(400, {"error": "top_p must be in (0, 1]"})
++            if top_k < 0:
++                return self.reply(400, {"error": "top_k must be >= 0"})
++            if not (0.0 <= min_p < 1.0):
++                return self.reply(400, {"error": "min_p must be in [0, 1)"})
+             kw = dict(body.get("chat_template_kwargs") or {})
+             kw.pop("enable_thinking", None)  # the release's template takes reasoning_effort; thinking cannot be off
+             if body.get("reasoning_effort") is not None and "reasoning_effort" not in kw:
+@@ -299,7 +309,8 @@ def make_handler(args, runner, tok, template):
+             text = tok.apply_chat_template(msgs, chat_template=template, add_generation_prompt=True,
+                                            tokenize=False, **kw)
+             ids = tok.encode(text, add_special_tokens=False)
+-            temp = 0.0 if top_k == 1 else float(body.get("temperature", 1.0))
++            raw_temp = float(body.get("temperature", 1.0))
++            temp = 0.0 if (top_k == 1 or raw_temp <= 0.0) else raw_temp
+             seed = int(body.get("seed", random.getrandbits(63))) & ((1 << 64) - 1)
+             max_new = int(body.get("max_tokens") or body.get("max_completion_tokens") or 4096)
+             stream = bool(body.get("stream"))
+@@ -333,7 +344,7 @@ def make_handler(args, runner, tok, template):
+                     self.send_header("Connection", "close")
+                     self.end_headers()
+                 last, end = None, None
+-                for ev in runner.generate(ids, max_new, temp, seed):
++                for ev in runner.generate(ids, max_new, temp, seed, top_p=top_p, top_k=top_k, min_p=min_p):
+                     if ev[0] == "e":
+                         end = ev
+                         break
+diff --git a/zig/kernels/xpu/inkling2/ink2.cl b/zig/kernels/xpu/inkling2/ink2.cl
+index 9fe60c02..23fe4ee3 100644
+--- a/zig/kernels/xpu/inkling2/ink2.cl
++++ b/zig/kernels/xpu/inkling2/ink2.cl
+@@ -88,17 +88,13 @@ KERNEL(512) void ink2_mix(global const float *S, Slots sl, global const float *q
+       const float v = x[c];
+       ss += v * v;
+       d0 += v * query[c];
+-      if (nq > 1) {
+-        d1 += v * query[C + c];
+-        d2 += v * query[2 * C + c];
+-      }
++      if (nq > 1) d1 += v * query[C + c];
++      if (nq > 2) d2 += v * query[2 * C + c];
+     }
+     ss = wg_sum(ss, red);
+     d0 = wg_sum(d0, red);
+-    if (nq > 1) {
+-      d1 = wg_sum(d1, red);
+-      d2 = wg_sum(d2, red);
+-    }
++    if (nq > 1) d1 = wg_sum(d1, red);
++    if (nq > 2) d2 = wg_sum(d2, red);
+     if (t == 0) {
+       const float r = rsqrt(ss / C + 1e-6f);
+       rs[s] = r;
+@@ -128,10 +124,8 @@ KERNEL(512) void ink2_mix(global const float *S, Slots sl, global const float *q
+       a2 += sc[2][s] * v;
+     }
+     out[c] = a0;
+-    if (nq > 1) {
+-      out[C + c] = a1;
+-      out[2 * C + c] = a2;
+-    }
++    if (nq > 1) out[C + c] = a1;
++    if (nq > 2) out[2 * C + c] = a2;
+   }
+ }
+ 
+@@ -1282,8 +1276,10 @@ KERNEL(256) void ink2_sample_part(global float *logits, int n, float cap, float
+     v = l;
+     if (temp > 0.0f) {
+       const uint h = mix32(mix32(mix32((uint)i ^ seed_lo) + step * 0x9e3779b9U) ^ seed_hi);
+-      const float u = ((float)(h >> 8) + 0.5f) * (1.0f / 16777216.0f);
+-      v = l / temp - log(-log(u));
++      // V = 1 - U in [2^-33, 1 - 2^-24]: full 32-bit precision in the Gumbel right tail, strictly finite for all h.
++      const float u1 = fmin(((float)h + 0.5f) * 0x1.0p-32f, 0x1.fffffep-1f);
++      const float e = (u1 < 1e-4f) ? (u1 + 0.5f * u1 * u1) : -log1p(-u1);
++      v = l / temp - log(e);
+     }
+   }
+   const float m = sub_group_reduce_max(v);
+@@ -1534,6 +1530,12 @@ KERNEL(128) void ink2_prep_b(global const float *P, global const float *D, globa
+     h1 = h2;
+     h2 = x;
+   }
++  // Zero <16-row KV tail padding so 16-row Xe2 2D block reads in ink2_attn_b_xmx never see uninitialized FP16 NaNs.
++  const int end_p = p0 + T;
++  const int pad_end = (end_p + 15) & ~15;
++  for (int pp_ = end_p; pp_ < pad_end; pp_++) {
++    if (pp_ < ring || !pp.global_layer) (isv ? Vc : Kc)[(long)(pp_ % ring) * 1024 + c] = (half)0.0f;
++  }
+   hout[site] = h0;
+   hout[HIST + site] = h1;
+   hout[2 * HIST + site] = h2;
+diff --git a/zig/src/families/inkling2/xpu_main.zig b/zig/src/families/inkling2/xpu_main.zig
+index 90c86d89..045f3dd3 100644
+--- a/zig/src/families/inkling2/xpu_main.zig
++++ b/zig/src/families/inkling2/xpu_main.zig
+@@ -75,7 +75,7 @@ const PROWS = 3072 + 384 + 3072 + 1024 + 1024; // q | rel | gate | k | v
+ const MAXS = 8;
+ const SLOTS = 32;
+ const TMAX = 256; // prompt rows a chunk
+-const RING = WINDOW + TMAX; // sliding caches: a chunk never overwrites keys its rows still read
++const RING = WINDOW + TMAX + 64; // sliding caches (1344 = 21*64): chunk + 16-row XMX padding stay disjoint from live window
+ 
+ fn layerOf(il: usize) usize {
+     if (il < CORE0) return il;
+@@ -662,8 +662,13 @@ const Runner = struct {
+     fd1: bool, // INK2_FD1=1: chunked attention with a separate prologue launch (ink2_prep + ink2_attn_fd)
+     rows4: u8, // Q8_0 rows a subgroup for the projections and LM head: 4 (default), INK2_ROWS=2 or 1
+     temp: f32 = 0, // sampling temperature of the request; 0: greedy
++    top_p: f32 = 1.0, // nucleus sampling threshold in (0, 1]
++    top_k: u32 = 0, // top-k truncation (0 = disabled)
++    min_p: f32 = 0.0, // min-p relative to top token probability in [0, 1)
+     seed: u64 = 0,
+     host_tok: [*]u32 = undefined,
++    host_logits: [*]f32 = undefined,
++    cand_buf: []u32 = &.{},
+     step_ev: [2]ze.H = @splat(null),
+     vision: ?vit.Vit = null,
+     img_pool: ?*anyopaque = null,
+@@ -855,8 +860,13 @@ const Runner = struct {
+         r.fd1 = getenv("INK2_FD1") != null;
+         r.rows4 = if (getenv("INK2_ROWS")) |v| try std.fmt.parseInt(u8, std.mem.span(v), 10) else 4;
+         r.temp = 0;
++        r.top_p = 1.0;
++        r.top_k = 0;
++        r.min_p = 0.0;
+         r.seed = 0;
+         r.host_tok = @ptrCast(@alignCast(try d.g.hostAlloc(64)));
++        r.host_logits = @ptrCast(@alignCast(try d.g.hostAlloc(m.vocab * @sizeOf(f32))));
++        r.cand_buf = try alloc.alloc(u32, m.vocab);
+         r.step_ev = try d.g.events(2);
+         r.vision = null;
+         r.img_pool = null;
+@@ -885,9 +895,8 @@ const Runner = struct {
+     }
+ 
+     fn control(r: *Runner, l: *const Layer, mod: usize, cur: *anyopaque, msg: *anyopaque, out: *anyopaque) !void {
+-        try r.d.launch(r.k.ctl_in, .{ .x = 1 }, .{ cur, msg, r.a.hin });
+-        try r.d.launch(r.k.gemv_f32, .{ .x = 4 }, .{ l.loop_down[mod].?, @as(i32, 64), @as(i32, 2 * C), r.a.hin, r.a.hin, r.a.hin, @as(i32, 64), @as(i32, 64), r.a.hdown });
+-        try r.d.launch(r.k.ctl_out, .{ .x = C / 16 }, .{ l.loop_gain[mod].?, l.loop_forget[mod].?, r.a.hdown, cur, msg, out });
++        try r.d.launch(r.k.ctl_down, .{ .x = 4, .y = 1 }, .{ cur, @as(i32, 0), msg, @as(i32, 0), l.loop_down4.?, @as(i32, @intCast(mod)), r.a.hd });
++        try r.d.launch(r.k.ctl_out2, .{ .x = C / 16, .y = 1 }, .{ l.loop_gain4.?, l.loop_forget4.?, @as(i32, @intCast(mod)), r.a.hd, cur, @as(i32, 0), msg, @as(i32, 0), out });
+     }
+ 
+     /// A free slot: none of `used` holds it.
+@@ -1150,10 +1159,22 @@ const Runner = struct {
+         try d.launch(r.k.argmax_final, .{ .x = 1 }, .{ a.pv, a.pi, @as(i32, @intCast(parts)), a.tok });
+     }
+ 
++    fn usesFilteredSampling(r: *const Runner) bool {
++        return r.temp > 0 and (r.top_p < 1.0 or r.top_k > 0 or r.min_p > 0.0);
++    }
++
+     fn finish(r: *Runner, pos: usize) !u32 {
+         const d = r.d;
+         const a = &r.a;
+         const n: u32 = @intCast(r.m.vocab);
++        if (r.usesFilteredSampling()) {
++            const parts = (n + 255) / 256;
++            try d.launch(r.k.argmax_part, .{ .x = parts }, .{ a.logits, @as(i32, @intCast(n)), r.cap, a.pv, a.pi });
++            try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, r.host_logits, a.logits, @as(usize, n) * @sizeOf(f32), null, 0, null));
++            try d.sync();
++            if (r.dump) |dir| try r.dumpRow(dir, "logits", 0, pos, a.logits, n);
++            return sampleFiltered(r.host_logits[0..n], r.cand_buf[0..n], r.temp, r.top_p, r.top_k, r.min_p, r.seed, pos);
++        }
+         try r.finishLaunch(pos);
+         var out: [4]u8 = undefined;
+         try d.read(&out, a.tok);
+@@ -1558,6 +1579,67 @@ fn profReport(d: *Dev, k: *const K, steps: usize) void {
+     }
+ }
+ 
++fn mix64(x_: u64) u64 {
++    var x = x_ +% 0x9e3779b97f4a7c15;
++    x = (x ^ (x >> 30)) *% 0xbf58476d1ce4e5b9;
++    x = (x ^ (x >> 27)) *% 0x94d049bb133111eb;
++    return x ^ (x >> 31);
++}
++
++fn descLogit(logits: []const f32, a: u32, b: u32) bool {
++    const la = logits[a];
++    const lb = logits[b];
++    return if (la != lb) la > lb else a < b;
++}
++
++/// Exact f64 top_k / min_p / top_p sampler over softcapped logits, deterministic by (seed, pos).
++fn sampleFiltered(logits: []const f32, cand_buf: []u32, temp: f32, top_p: f32, top_k: u32, min_p: f32, seed: u64, pos: usize) u32 {
++    var max_l: f32 = -std.math.inf(f32);
++    var best_i: usize = 0;
++    for (logits, 0..) |l, i| {
++        if (l > max_l) {
++            max_l = l;
++            best_i = i;
++        }
++    }
++    if (!std.math.isFinite(max_l) or temp <= 0.0) return @intCast(best_i);
++    const inv_t: f64 = 1.0 / @as(f64, temp);
++    const min_l_tail: f32 = max_l - 22.0 * temp;
++    const min_l_p: f32 = if (min_p > 0.0) max_l + temp * @log(min_p) else min_l_tail;
++    const cutoff: f32 = @max(min_l_tail, min_l_p);
++    var n_cand: usize = 0;
++    for (logits, 0..) |l, i| {
++        if (l >= cutoff) {
++            cand_buf[n_cand] = @intCast(i);
++            n_cand += 1;
++        }
++    }
++    if (n_cand == 0) return @intCast(best_i);
++    var cands = cand_buf[0..n_cand];
++    std.mem.sort(u32, cands, logits, descLogit);
++    if (top_k > 0 and top_k < cands.len) cands = cands[0..top_k];
++    var total_w: f64 = 0.0;
++    for (cands) |id| total_w += @exp((@as(f64, logits[id]) - @as(f64, max_l)) * inv_t);
++    var kept_n: usize = 0;
++    var kept_w: f64 = 0.0;
++    const p_lim: f64 = @as(f64, top_p) * total_w;
++    for (cands, 0..) |id, j| {
++        kept_w += @exp((@as(f64, logits[id]) - @as(f64, max_l)) * inv_t);
++        kept_n = j + 1;
++        if (top_p < 1.0 and kept_w >= p_lim) break;
++    }
++    const h64 = mix64(seed ^ (@as(u64, pos) *% 0x9e3779b97f4a7c15));
++    // 52-bit exact f64 uniform in [2^-53, 1 - 2^-53]
++    const u: f64 = (@as(f64, @floatFromInt(h64 >> 12)) + 0.5) * (1.0 / 4503599627370496.0);
++    const target: f64 = u * kept_w;
++    var acc: f64 = 0.0;
++    for (cands[0..kept_n]) |id| {
++        acc += @exp((@as(f64, logits[id]) - @as(f64, max_l)) * inv_t);
++        if (acc >= target) return id;
++    }
++    return cands[kept_n - 1];
++}
++
+ fn writeOut(bytes: []const u8) void {
+     var done: usize = 0;
+     while (done < bytes.len) {
+@@ -1680,9 +1762,22 @@ fn serve(r: *Runner, eos: u32) !void {
+             writeOut(try std.fmt.bufPrint(&msg, "i {d} {d} {d:.3} {d}\n", .{ off_i, n_img, (tv1 - tv0) * 1e3, wrapped }));
+             continue;
+         }
+-        const max_new = try std.fmt.parseInt(usize, first, 10);
+-        r.temp = try std.fmt.parseFloat(f32, it.next() orelse return error.BadRequest);
+-        r.seed = try std.fmt.parseInt(u64, it.next() orelse return error.BadRequest, 10);
++        var max_new: usize = undefined;
++        if (std.mem.eql(u8, first, "s")) {
++            max_new = try std.fmt.parseInt(usize, it.next() orelse return error.BadRequest, 10);
++            r.temp = try std.fmt.parseFloat(f32, it.next() orelse return error.BadRequest);
++            r.top_p = try std.fmt.parseFloat(f32, it.next() orelse return error.BadRequest);
++            r.top_k = try std.fmt.parseInt(u32, it.next() orelse return error.BadRequest, 10);
++            r.min_p = try std.fmt.parseFloat(f32, it.next() orelse return error.BadRequest);
++            r.seed = try std.fmt.parseInt(u64, it.next() orelse return error.BadRequest, 10);
++        } else {
++            max_new = try std.fmt.parseInt(usize, first, 10);
++            r.temp = try std.fmt.parseFloat(f32, it.next() orelse return error.BadRequest);
++            r.top_p = 1.0;
++            r.top_k = 0;
++            r.min_p = 0.0;
++            r.seed = try std.fmt.parseInt(u64, it.next() orelse return error.BadRequest, 10);
++        }
+         var ids: std.ArrayList(u32) = .empty;
+         defer ids.deinit(alloc);
+         while (it.next()) |w| try ids.append(alloc, try std.fmt.parseInt(u32, w, 10));
+@@ -1734,7 +1829,7 @@ fn serve(r: *Runner, eos: u32) !void {
+         }
+         const t1 = now();
+         var n_gen: usize = 0;
+-        if (!r.v1 and !r.sync_step and r.dump == null and max_new > 1) {
++        if (!r.v1 and !r.sync_step and !r.usesFilteredSampling() and r.dump == null and max_new > 1) {
+             writeOut(try std.fmt.bufPrint(&msg, "t {d}\n", .{next}));
+             n_gen = 1;
+             if (next != eos) {
+-- 
+2.53.0
+

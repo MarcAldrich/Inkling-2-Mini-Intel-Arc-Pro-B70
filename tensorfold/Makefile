@@ -12,7 +12,7 @@ MMPROJ_FILE    ?= mmproj-F16.gguf
 CTX            ?= 262144
 HEALTH_TIMEOUT ?= 300
 
-.PHONY: build rebuild run stop logs status health smoke bench profile
+.PHONY: build rebuild run stop logs status health smoke test test-http bench profile
 
 build:
 	@if podman image exists $(IMAGE) 2>/dev/null; then \
@@ -126,3 +126,23 @@ smoke:
 	curl -fsS http://127.0.0.1:$(PORT)/v1/chat/completions \
 		-H 'Content-Type: application/json' \
 		-d '{"model":"'"$(ALIAS)"'","max_tokens":128,"temperature":1.0,"top_p":1.0,"messages":[{"role":"user","content":"What is 17*23? Reply with only the number."}]}'
+
+# Direct GPU runner quality/parity/coherence regression suite (stop server first to avoid VRAM contention)
+test:
+	@test -f "$(MODEL_DIR)/$(MODEL_FILE)" || { echo "Missing model: $(MODEL_DIR)/$(MODEL_FILE)"; exit 1; }
+	@PCI_ADDR=$$(lspci -D | grep -Ei 'vga|display' | grep -i battlemage | awk 'NR==1{print $$1}'); \
+	RENDER_NODE=$$(readlink -f /dev/dri/by-path/pci-$$PCI_ADDR-render); \
+	CARD_NODE=$$(readlink -f /dev/dri/by-path/pci-$$PCI_ADDR-card); \
+	podman run --rm \
+		--device $$RENDER_NODE --device $$CARD_NODE \
+		--group-add keep-groups \
+		--ulimit memlock=-1:-1 \
+		-v $(MODEL_DIR):/models:ro \
+		-e ZE_AFFINITY_MASK=0 \
+		--entrypoint /opt/venv/bin/python3 \
+		$(IMAGE) /app/test_quality.py --mode runner --runner /app/bin/xpu-inkling2 --model /models/$(MODEL_FILE) --meta /app/meta
+
+# Live HTTP OpenAI + Hermes tool-calling + streaming + vision regression suite
+test-http:
+	podman run --rm --network host --entrypoint /opt/venv/bin/python3 \
+		$(IMAGE) /app/test_quality.py --mode http --url http://127.0.0.1:$(PORT)

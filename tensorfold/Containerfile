@@ -63,6 +63,7 @@ WORKDIR /app
 COPY --from=deps /app/meta /app/meta
 COPY --from=builder /app/out/bin/xpu-inkling2 /app/bin/xpu-inkling2
 COPY --from=builder /app/inkling2_serve.py /app/inkling2_serve.py
+COPY test_quality.py /app/test_quality.py
 
 EXPOSE 8080
 

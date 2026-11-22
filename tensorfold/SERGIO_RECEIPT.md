@@ -2,12 +2,12 @@
 
 > **Target upstream:** [`SergiioB/TensorFold`](https://github.com/SergiioB/TensorFold)  
 > **Base tag / SHA:** `b70-inkling2-mini-20261121` (`e47dc7ae8e06c9cdefb846e01cf4671bad6cb3db`)  
-> **Branch / Head SHA:** `b70-xe2-xmx-dp4a` (4 atomic commits exported in `tensorfold/patches/`)  
+> **Branch / Head SHA:** `b70-xe2-xmx-dp4a` (`1ff69191`, 5 atomic commits exported in `tensorfold/patches/`)  
 > **PR status note:** `zig/src/families/inkling2/` and `zig/kernels/xpu/inkling2/` currently exist only on tag `b70-inkling2-mini-20261121` and are not yet on `origin/main` (`1a564489`); `SergiioB/TensorFold` also has `has_issues: false` and 0 open/closed community PRs at time of measurement. Patches and this complete receipt are formatted directly to `.github/pull_request_template.md` so they can be applied cleanly on top of `b70-inkling2-mini-20261121` or stacked on the `inkling2` PR once opened.
 
 ---
 
-## 1. What This Changes (3 Atomic Commits)
+## 1. What This Changes (5 Atomic Commits)
 
 1. **`804d71ac` — `xpu-inkling2: Xe2 XMX DPAS prefill/attn, DP4A decode, async pipeline`** (`ink2.cl`, `xpu_main.zig`)
    - **Async pipelined decode:** `ink2_embed_dev` reads the next token ID directly from device memory with a 2-slot host-pinned event ring (`stepV2Async` / `waitSlot`; `INK2_SYNC=1` restores sync).
@@ -38,12 +38,19 @@
      - **Multi-turn image cache (Turn 2 on same `800×400`):** `"Green"` with **`vision_ms = 0.0 ms`** and **`prompt_ms = 71.2 ms`** (`82.2 tok/s` decode).
      - **Resolution latency sweep:** `320×320` (`64` tok) = `12.7 ms`, `640×640` (`256` tok) = `52.2 ms`, `1280×720` (`576` tok) = `126.0 ms`, `1920×1080` (`1,296` tok) = `463.7 ms`.
 
+5. **`1ff69191` — `xpu-inkling2: fix Gumbel float32 +INF bug, add top_p/top_k/min_p, zero XMX KV tail`** (`ink2.cl`, `xpu_main.zig`, `inkling2_serve.py`)
+   - **Critical upstream sampling fix (`ink2_sample_part`):** In base `e47dc7ae`, `((float)(h >> 8) + 0.5f) * (1.0f / 16777216.0f)` rounds `(float)16777215 + 0.5f` up to `16777216.0f` (`u = 1.0f`) under IEEE-754 round-to-nearest-even, producing `-log(-log(1.0f)) = +INFINITY` and overriding all logits with a uniformly random token across the 200,058-token vocabulary once every ~84 tokens (`1.192%/tok`). Replaced with strictly finite 32-bit `V = 1 - U` Gumbel sampling (`u1 in [2^-33, 1 - 2^-24]`, Taylor `-log1p(-u1)` for `u1 < 1e-4`, `KS = 0.00064` over 2M draws).
+   - **Exact `top_p` / `top_k` / `min_p` sampling:** Added `s <max_new> <temp> <top_p> <top_k> <min_p> <seed> <ids...>` protocol (backwards-compatible with legacy format), keeping the 0-overhead 2-slot async GPU Gumbel path when `top_p=1, top_k=0, min_p=0` and using exact `f64` host filtering (`~77.6 tok/s`) when truncation is requested; `inkling2_serve.py` validates and forwards `top_p`, `top_k`, `min_p`.
+   - **Upstream `ink2_mix` OOB fix + `INK2_V1=1` BF16 controller fix:** Guarded `d2`/`out[2*C+c]` with `if (nq > 2)` (previously `if (nq > 1)` wrote past `2*C` `a.msg_a`/`a.msg_k` and read past `m.loop_q`), and updated `stepV1` `control()` to BF16 kernels (`INK2_V1=1` now matches pure FP32 `8/8`).
+   - **XMX KV padding hygiene:** `ink2_prep_b` zeroes `<16`-row tail padding of `Kc`/`Vc` (with `RING = 1344 = 21*64`) so 16-row Xe2 2D block reads in `ink2_attn_b_xmx` never touch uninitialized FP16 padding.
+   - **Regression suite (`tensorfold/test_quality.py`):** Verified `16/16` short decode parity (`mean_KL=0.00040`), bit-exact `PrefixCkpt` at `2,816 > RING` (`max_diff=0.00`), `0` stray foreign-script chars across `4,096` sampled tokens (`T=1.0`, `top_p=1.0 & 0.95`, including former `+INF` trigger seeds `1001`/`1002`), and live HTTP Hermes multi-turn `tool_calls` + SSE streaming + vision.
+
 ---
 
-## 2. Environment & Checks on Head `435143c5`
+## 2. Environment & Checks on Head `1ff69191`
 
 - **Base SHA:** `e47dc7ae8e06c9cdefb846e01cf4671bad6cb3db` (`b70-inkling2-mini-20261121`)
-- **Head SHA:** `435143c5` (stack: `804d71ac` → `f1e74aa9` → `435143c5`)
+- **Head SHA:** `1ff69191` (stack: `804d71ac` → `f1e74aa9` → `435143c5` → `f1b1eac4` → `1ff69191`)
 - **Machine / GPU / OS:** Linux `7.0.0-44-generic` `x86_64`, `30 GiB` host RAM, **Intel Arc Pro B70 (BMG-G31 / Xe2, PCI `8086:e223`, 32 GiB GDDR6, 256-bit ~608 GB/s, 32 Xe-cores)**
 - **Containerized Toolchain (`ubuntu:26.04`, zero host build deps):**
   - Zig: `0.17.0`
@@ -161,5 +168,6 @@ cd TensorFold
 git am /path/to/tensorfold/patches/0001-*.patch \
        /path/to/tensorfold/patches/0002-*.patch \
        /path/to/tensorfold/patches/0003-*.patch \
-       /path/to/tensorfold/patches/0004-*.patch
+       /path/to/tensorfold/patches/0004-*.patch \
+       /path/to/tensorfold/patches/0005-*.patch
 ```

@@ -1,7 +1,7 @@
 From 804d71ac53509c002b4ab1e35a0be48f993de610 Mon Sep 17 00:00:00 2001
 From: Marc Aldrich <7917445+MarcAldrich@users.noreply.github.com>
 Date: Sat, 21 Nov 2026 23:03:13 -0600
-Subject: [PATCH 1/4] xpu-inkling2: Xe2 XMX DPAS prefill/attn, DP4A decode,
+Subject: [PATCH 1/5] xpu-inkling2: Xe2 XMX DPAS prefill/attn, DP4A decode,
  async pipeline
 
 Optimize xpu-inkling2 for Intel Arc Pro B70 (BMG-G31 / Xe2):
