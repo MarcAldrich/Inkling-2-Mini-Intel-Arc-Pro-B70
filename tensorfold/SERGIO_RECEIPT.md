@@ -1,13 +1,13 @@
 # TensorFold XPU (`xpu-inkling2`) — Intel Arc Pro B70 Performance & Accuracy Receipt
 
-> **Target upstream:** [`SergiioB/TensorFold`](https://github.com/SergiioB/TensorFold)  
-> **Base tag / SHA:** `b70-inkling2-mini-20261121` (`e47dc7ae8e06c9cdefb846e01cf4671bad6cb3db`)  
-> **Branch / Head SHA:** `b70-xe2-xmx-dp4a` (`1ff69191`, 5 atomic commits exported in `tensorfold/patches/`)  
-> **PR status note:** `zig/src/families/inkling2/` and `zig/kernels/xpu/inkling2/` currently exist only on tag `b70-inkling2-mini-20261121` and are not yet on `origin/main` (`1a564489`); `SergiioB/TensorFold` also has `has_issues: false` and 0 open/closed community PRs at time of measurement. Patches and this complete receipt are formatted directly to `.github/pull_request_template.md` so they can be applied cleanly on top of `b70-inkling2-mini-20261121` or stacked on the `inkling2` PR once opened.
+> - **Target upstream:** [`SergiioB/TensorFold`](https://github.com/SergiioB/TensorFold)
+> - **Base tag / SHA:** `b70-inkling2-mini-20261121` (`e47dc7ae8e06c9cdefb846e01cf4671bad6cb3db`)
+> - **Branch / Head SHA:** `b70-xe2-xmx-dp4a` (`b343e77e`, 6 atomic commits exported in `tensorfold/patches/`)
+> - **PR status note:** `zig/src/families/inkling2/` and `zig/kernels/xpu/inkling2/` currently exist only on tag `b70-inkling2-mini-20261121` and are not yet on `origin/main` (`1a564489`); `SergiioB/TensorFold` also has `has_issues: false` and 0 open/closed community PRs at time of measurement. Patches, this complete receipt, and the ready-to-paste PR template (`tensorfold/SERGIO_PR.md`) are formatted directly to `.github/pull_request_template.md` so they can be applied cleanly on top of `b70-inkling2-mini-20261121` or stacked on the `inkling2` PR once opened.
 
 ---
 
-## 1. What This Changes (5 Atomic Commits)
+## 1. What This Changes (6 Atomic Commits)
 
 1. **`804d71ac` — `xpu-inkling2: Xe2 XMX DPAS prefill/attn, DP4A decode, async pipeline`** (`ink2.cl`, `xpu_main.zig`)
    - **Async pipelined decode:** `ink2_embed_dev` reads the next token ID directly from device memory with a 2-slot host-pinned event ring (`stepV2Async` / `waitSlot`; `INK2_SYNC=1` restores sync).
@@ -43,14 +43,17 @@
    - **Exact `top_p` / `top_k` / `min_p` sampling:** Added `s <max_new> <temp> <top_p> <top_k> <min_p> <seed> <ids...>` protocol (backwards-compatible with legacy format), keeping the 0-overhead 2-slot async GPU Gumbel path when `top_p=1, top_k=0, min_p=0` and using exact `f64` host filtering (`~77.6 tok/s`) when truncation is requested; `inkling2_serve.py` validates and forwards `top_p`, `top_k`, `min_p`.
    - **Upstream `ink2_mix` OOB fix + `INK2_V1=1` BF16 controller fix:** Guarded `d2`/`out[2*C+c]` with `if (nq > 2)` (previously `if (nq > 1)` wrote past `2*C` `a.msg_a`/`a.msg_k` and read past `m.loop_q`), and updated `stepV1` `control()` to BF16 kernels (`INK2_V1=1` now matches pure FP32 `8/8`).
    - **XMX KV padding hygiene:** `ink2_prep_b` zeroes `<16`-row tail padding of `Kc`/`Vc` (with `RING = 1344 = 21*64`) so 16-row Xe2 2D block reads in `ink2_attn_b_xmx` never touch uninitialized FP16 padding.
-   - **Regression suite (`tensorfold/test_quality.py`):** Verified `16/16` short decode parity (`mean_KL=0.00040`), bit-exact `PrefixCkpt` at `2,816 > RING` (`max_diff=0.00`), `0` stray foreign-script chars across `4,096` sampled tokens (`T=1.0`, `top_p=1.0 & 0.95`, including former `+INF` trigger seeds `1001`/`1002`), and live HTTP Hermes multi-turn `tool_calls` + SSE streaming + vision.
+   - **Regression suite (`tensorfold/test_quality.py`):** Verified `16/16` short decode parity (`mean_KL=0.00040`), bit-exact `PrefixCkpt` at `2,816 > RING` (`max_diff=0.00`), `0` stray foreign-script chars across `4,096` sampled tokens (`T=1.0`, `top_p=1.0 & 0.95`, including former `+INF` trigger seeds `1001`/`1002`), and live HTTP multi-turn `tool_calls` + SSE streaming + vision.
+
+6. **`b343e77e` — `inkling2_serve: drain runner on mid-stream client disconnect, bump default max_tokens to 16384`** (`tools/xpu/inkling2_serve.py`)
+   - Drains remaining runner output until `DONE` if an SSE client closes the connection mid-stream (preventing `Protocol desync` on the next request), and increases default `max_tokens` to `16384` for long reasoning + tool-calling turns.
 
 ---
 
-## 2. Environment & Checks on Head `1ff69191`
+## 2. Environment & Checks on Head `b343e77e`
 
 - **Base SHA:** `e47dc7ae8e06c9cdefb846e01cf4671bad6cb3db` (`b70-inkling2-mini-20261121`)
-- **Head SHA:** `1ff69191` (stack: `804d71ac` → `f1e74aa9` → `435143c5` → `f1b1eac4` → `1ff69191`)
+- **Head SHA:** `b343e77e` (stack: `804d71ac` → `f1e74aa9` → `435143c5` → `f1b1eac4` → `1ff69191` → `b343e77e`)
 - **Machine / GPU / OS:** Linux `7.0.0-44-generic` `x86_64`, `30 GiB` host RAM, **Intel Arc Pro B70 (BMG-G31 / Xe2, PCI `8086:e223`, 32 GiB GDDR6, 256-bit ~608 GB/s, 32 Xe-cores)**
 - **Containerized Toolchain (`ubuntu:26.04`, zero host build deps):**
   - Zig: `0.17.0`
@@ -60,11 +63,13 @@
 - **Checks:**
   - `zig fmt --check build.zig zig`: **PASS**
   - `git diff --check e47dc7ae..HEAD`: **PASS**
+  - `git am tensorfold/patches/*.patch` on fresh `e47dc7ae` archive: **6/6 PASS** (byte-identical tree)
   - `python3 tools/zig/lean_check.py` / `tools/pr_check.py --base e47dc7ae`: **base `241` → head `231` (`0` new findings, `-10` net)** *(2 inherited >600-line file errors on `ink2.cl` and `xpu_main.zig`, both already >1500 lines on `e47dc7ae`)*
   - `zig build test-inkling2-host`: **`24/28` passed, `4` skipped, `0` failed** (`80 ms`)
   - `ocloc` (`bmg`, 128-GRF and 256-GRF): **`0` register spills, `0` warnings**
-  - Author/committer check (`git log --format='%an <%ae>'`): `Marc Aldrich <7917445+MarcAldrich@users.noreply.github.com>` across all 3 commits; no local paths or AI trailers.
-- **Platforms not run:** Metal, CUDA, HIP, Windows (all changes are scoped exclusively to `zig/kernels/xpu/inkling2/`, `zig/src/families/inkling2/xpu_main.zig`, and `tools/xpu/inkling2_serve.py`).
+  - Author/committer check (`git log --format='%an <%ae>'`): `Marc Aldrich <7917445+MarcAldrich@users.noreply.github.com>` across all 6 commits; no local paths or AI trailers.
+  - **8+ hour live `--serve` soak test (`CTX=262144` + `mmproj-F16.gguf`):** `140+` continuous multi-turn coding, tool-calling, and 720p multimodal vision sessions at steady `~81–82 tok/s` decode and `~120 ms` ViT encode — **`19.9M+` characters scanned across 247 generated files and logs with `0` stray foreign-script characters and `0` disconnect desyncs**.
+- **Platforms not run:** Metal, CUDA, HIP, Windows (all changes are scoped exclusively to `zig/kernels/xpu/inkling2/`, `zig/src/families/inkling2/`, `zig/build/xpu_inkling2.zig`, and `tools/xpu/inkling2_serve.py`).
 
 ---
 
@@ -152,7 +157,7 @@ GPU busy 11.692 ms a step, 537 launches a step (85.5 tok/s GPU-only ceiling)
 ## 5. Additional Patches Needed to Land `inkling2` Upstream on `TensorFold/main`
 
 Because `b70-inkling2-mini-20261121` is currently a standalone research tag not merged into `main`, landing these patches into `TensorFold/main` would additionally need:
-1. **Base `inkling2` family merge:** Cherry-pick/merge the 24 `inkling2` files from tag `b70-inkling2-mini-20261121` (`e47dc7ae`) onto `main` first (or apply our 3 patches directly onto Sergio's working `inkling2` branch).
+1. **Base `inkling2` family merge:** Cherry-pick/merge the 24 `inkling2` files from tag `b70-inkling2-mini-20261121` (`e47dc7ae`) onto `main` first (or apply our 6 patches directly onto Sergio's working `inkling2` branch).
 2. **600-line lean file split (for `pr_check.py` on `main`):** Split `ink2.cl` (currently 3,230 lines; 2,247 on base) and `xpu_main.zig` (currently 1,808 lines; 1,527 on base) into `<= 600`-line modules (e.g., `ink2_decode.cl`, `ink2_dp4a.cl`, `ink2_xmx.cl`, `ink2_attn_xmx.cl`, plus `xpu_loader.zig`, `xpu_prefix.zig`, `xpu_serve.zig`).
 3. **Environment registry & kernel contract:** Register any retained `INK2_*` runtime switches in `zig/src/platform/environment.zig` (if promoted to `TF_*` server flags) and register the new Xe2 XMX/DP4A kernels in `docs/kernel-contract.md` / XPU contract tests once `xpu-inkling2` is integrated into `tensorfold-native`.
 4. **Native Zig server integration (optional):** Wire `PrefixCkpt` into TensorFold's shared core prompt-cache store (`TENSORFOLD_PROMPT_CACHE_*`) when `inkling2` graduates from the standalone `xpu-inkling2` runner into `tensorfold-native`.
@@ -169,5 +174,6 @@ git am /path/to/tensorfold/patches/0001-*.patch \
        /path/to/tensorfold/patches/0002-*.patch \
        /path/to/tensorfold/patches/0003-*.patch \
        /path/to/tensorfold/patches/0004-*.patch \
-       /path/to/tensorfold/patches/0005-*.patch
+       /path/to/tensorfold/patches/0005-*.patch \
+       /path/to/tensorfold/patches/0006-*.patch
 ```
